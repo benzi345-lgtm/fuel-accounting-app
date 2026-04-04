@@ -5570,7 +5570,9 @@ function generateCreditSummary() {
                     if (st.fuelTypeFilter && item.fuelType !== st.fuelTypeFilter) return;
                     const key = name.toLowerCase();
                     if (!customerMap[key]) {
-                        customerMap[key] = { displayName: name, totalAmount: 0, totalLiters: 0, entries: [] };
+                        const _ml = (typeof CREDIT_CUSTOMERS_MASTER !== 'undefined') ? CREDIT_CUSTOMERS_MASTER : [];
+                        const _cm = _ml.find(c => c.name === name);
+                        customerMap[key] = { displayName: name, code: _cm ? _cm.code : '9999', totalAmount: 0, totalLiters: 0, entries: [] };
                     }
                     const amt = parseNum(item.amount);
                     const lit = parseNum(item.liters);
@@ -5597,8 +5599,8 @@ function generateCreditSummary() {
     Object.values(customerMap).forEach(c => {
         c.entries.sort((a, b) => a.date.localeCompare(b.date) || a.stationName.localeCompare(b.stationName));
     });
-    // Sort customers by total amount descending
-    const customers = Object.values(customerMap).sort((a, b) => b.totalAmount - a.totalAmount);
+    // Sort customers by code ascending
+    const customers = Object.values(customerMap).sort((a, b) => (a.code || '9999').localeCompare(b.code || '9999'));
     const grandTotal = customers.reduce((s, c) => s + c.totalAmount, 0);
     const grandLiters = customers.reduce((s, c) => s + c.totalLiters, 0);
 
@@ -5830,7 +5832,11 @@ function getCreditOutstandingByCustomer() {
         (r.creditCustomers || []).forEach(c => {
             const name = (c.name || '').trim();
             if (!name) return;
-            if (!customerMap[name]) customerMap[name] = { name, code: c.cusCode || '', totalCredit: 0, totalPaid: 0, entries: [], payments: [], oldestUnpaidDate: null };
+            if (!customerMap[name]) {
+                const _ml = (typeof CREDIT_CUSTOMERS_MASTER !== 'undefined') ? CREDIT_CUSTOMERS_MASTER : [];
+                const _cm = _ml.find(m => m.name === name);
+                customerMap[name] = { name, code: (_cm ? _cm.code : c.cusCode) || '9999', totalCredit: 0, totalPaid: 0, entries: [], payments: [], oldestUnpaidDate: null };
+            }
             customerMap[name].totalCredit += parseNum(c.amount);
             customerMap[name].entries.push({ date: r.date, stationId: r.stationId, stationName: getStationName(r.stationId), amount: parseNum(c.amount), fuelType: c.fuelType, liters: parseNum(c.liters), refNo: c.refNo || '' });
         });
@@ -5882,7 +5888,7 @@ function renderCreditManagement() {
     const customerMap = getCreditOutstandingByCustomer();
     const settings = DB.getCreditSettings();
     const customers = Object.values(customerMap).filter(c => c.outstanding > 0 || c.totalCredit > 0);
-    customers.sort((a, b) => b.outstanding - a.outstanding);
+    customers.sort((a, b) => (a.code || '9999').localeCompare(b.code || '9999'));
 
     const overdue = customers.filter(c => c.isOverdue);
     const blocked = customers.filter(c => c.isBlocked);
