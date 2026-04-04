@@ -4229,24 +4229,25 @@ function printCreditCustomers() {
 
     var printHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>รายการลูกหนี้เงินเชื่อ</title>'
         + '<style>'
-        + 'body{font-family:"Sarabun",sans-serif;font-size:13px;margin:0;padding:20px;color:#333}'
-        + '.header{text-align:center;margin-bottom:16px;border-bottom:2px solid #333;padding-bottom:12px}'
-        + '.header h2{margin:0;font-size:18px}'
-        + '.header h3{margin:4px 0;font-size:14px;font-weight:normal;color:#666}'
-        + '.header .date{font-size:15px;font-weight:bold;margin-top:8px}'
-        + 'table{width:100%;border-collapse:collapse;margin-bottom:16px}'
-        + 'th,td{padding:5px 8px;border:1px solid #ccc;font-size:12px}'
+        + 'body{font-family:"Sarabun",sans-serif;font-size:11px;margin:0;padding:8px 15px;color:#333}'
+        + '#content{transform-origin:top left}'
+        + '.header{text-align:center;margin-bottom:8px;border-bottom:2px solid #333;padding-bottom:6px}'
+        + '.header h2{margin:0;font-size:15px}'
+        + '.header h3{margin:2px 0;font-size:11px;font-weight:normal;color:#666}'
+        + '.header .date{font-size:13px;font-weight:bold;margin-top:4px}'
+        + 'table{width:100%;border-collapse:collapse;margin-bottom:8px}'
+        + 'th,td{padding:2px 6px;border:1px solid #ccc;font-size:10px}'
         + 'th{background:#f5f5f5;font-weight:bold;text-align:left}'
-        + '.section-title{font-weight:bold;font-size:14px;margin:16px 0 6px;padding:4px 0;border-bottom:1px solid #999}'
+        + '.section-title{font-weight:bold;font-size:12px;margin:8px 0 4px;padding:2px 0;border-bottom:1px solid #999}'
         + '.total-row{font-weight:bold;background:#f0f0f0}'
-        + '.big-total{font-size:16px;font-weight:bold;padding:8px;margin:8px 0;border:2px solid #333;text-align:center}'
-        + '.signature{margin-top:40px;display:flex;justify-content:space-around}'
-        + '.signature div{text-align:center;width:200px}'
-        + '.signature .line{border-bottom:1px solid #333;height:40px}'
-        + '@media print{body{padding:10px}@page{size:A4;margin:10mm}}'
+        + '.big-total{font-size:13px;font-weight:bold;padding:4px;margin:4px 0;border:2px solid #333;text-align:center}'
+        + '.signature{margin-top:20px;display:flex;justify-content:space-around}'
+        + '.signature div{text-align:center;width:160px}'
+        + '.signature .line{border-bottom:1px solid #333;height:30px}'
+        + '@media print{body{padding:4px 10px}@page{size:A4;margin:5mm}}'
         + '</style>'
         + '<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;700&display=swap" rel="stylesheet">'
-        + '</head><body>'
+        + '</head><body><div id="content">'
 
         // Header
         + '<div class="header">'
@@ -4277,12 +4278,26 @@ function printCreditCustomers() {
         + '<div><div class="line"></div><div>ผู้ตรวจสอบ</div></div>'
         + '<div><div class="line"></div><div>ผู้อนุมัติ</div></div>'
         + '</div>'
+        + '</div>' // close #content
+        + '<script>'
+        + 'window.addEventListener("load",function(){'
+        + 'var c=document.getElementById("content");'
+        + 'var pageH=1045;'
+        + 'var h=c.scrollHeight;'
+        + 'if(h>pageH){'
+        + 'var s=pageH/h;'
+        + 'c.style.transform="scale("+s+")";'
+        + 'c.style.transformOrigin="top left";'
+        + 'c.style.width=(100/s)+"%";'
+        + '}'
+        + 'setTimeout(function(){window.print();},300);'
+        + '});'
+        + '<\/script>'
         + '</body></html>';
 
     var printWin = window.open('', '_blank');
     printWin.document.write(printHtml);
     printWin.document.close();
-    printWin.onload = function() { printWin.print(); };
 }
 
 // ===== SUMMARY TAB =====
@@ -4407,7 +4422,10 @@ function renderSummaryTab() {
 
     <div class="card" style="margin-top:16px;">
         <div class="card-header"><h3>สรุปบัญชีประจำวัน</h3>
-            <button class="btn btn-sm btn-primary" onclick="printDailySummary()">🖨️ พิมพ์ใบสรุป</button>
+            <div style="display:flex;gap:8px">
+                <button class="btn btn-sm btn-primary" onclick="printDailySummary()">🖨️ พิมพ์ใบสรุป</button>
+                <button class="btn btn-sm btn-outline" onclick="printCreditCustomers()">🖨️ พิมพ์ใบสรุปลูกหนี้</button>
+            </div>
         </div>
         <div class="finance-grid">
             <div class="summary-box">
