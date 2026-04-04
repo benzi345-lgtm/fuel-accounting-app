@@ -5549,6 +5549,11 @@ function renderCreditSummary(el) {
                 <button class="btn btn-primary" onclick="generateCreditSummary()">แสดงรายงาน</button>
             </div>
         </div>
+        <div style="border-top:1px solid #e5e7eb;padding:12px 16px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+            <div class="form-group" style="margin:0"><label style="font-size:12px;margin-bottom:4px">📅 พิมพ์ใบสรุปรายวัน (ทุกสาขา)</label>
+            <input type="date" id="creditDailyPrintDate" value="${todayStr()}" style="padding:6px 10px"></div>
+            <button class="btn btn-primary" onclick="printDailyCreditAllStations()">🖨️ พิมพ์ใบสรุปลูกหนี้รายวัน</button>
+        </div>
     </div>
     <div id="creditSummaryResult"></div>
     <div id="creditManagementSection"></div>`;
@@ -6131,15 +6136,6 @@ function renderCreditManagement() {
         paginationHtml += '<button class="pagination-btn' + (curPage >= totalPages - 1 ? ' disabled' : '') + '" onclick="window._creditPage=' + (curPage + 1) + ';renderCreditManagement()"' + (curPage >= totalPages - 1 ? ' disabled' : '') + '>ถัดไป &raquo;</button>';
         paginationHtml += '</div>';
     }
-
-    // Daily credit print section
-    html += '<div class="card" style="margin-bottom:16px">'
-        + '<div class="card-header"><h3>🖨️ พิมพ์ใบสรุปลูกหนี้รายวัน (ทุกสาขา)</h3></div>'
-        + '<div style="display:flex;gap:12px;align-items:flex-end;padding:12px 16px;flex-wrap:wrap">'
-        + '<div class="form-group" style="margin:0"><label style="font-size:12px;margin-bottom:4px">วันที่</label>'
-        + '<input type="date" id="creditDailyPrintDate" value="' + todayStr() + '" style="padding:6px 10px"></div>'
-        + '<button class="btn btn-primary" onclick="printDailyCreditAllStations()">🖨️ พิมพ์ใบสรุปลูกหนี้รายวัน</button>'
-        + '</div></div>';
 
     html += '<div class="card" style="margin-bottom:16px">'
         + '<div class="card-header">'
