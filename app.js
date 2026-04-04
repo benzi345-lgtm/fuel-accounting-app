@@ -5900,6 +5900,150 @@ function getCreditOutstandingByCustomer() {
 }
 
 // Render credit management section in the credit summary page
+function printDailyCreditAllStations() {
+    var dateStr = document.getElementById('creditDailyPrintDate').value;
+    if (!dateStr) { showToast('กรุณาเลือกวันที่', 'error'); return; }
+
+    var allRecords = DB.getAllRecords();
+    var dayRecords = allRecords.filter(function(r) { return r.date === dateStr; });
+
+    // Collect all credit entries for this date across all stations
+    var customerMap = {};
+    dayRecords.forEach(function(r) {
+        var stName = getStationName(r.stationId);
+        (r.creditCustomers || []).forEach(function(c) {
+            var name = (c.name || '').trim();
+            if (!name) return;
+            var code = c.cusCode || '';
+            if (!code) {
+                var ml = (typeof CREDIT_CUSTOMERS_MASTER !== 'undefined') ? CREDIT_CUSTOMERS_MASTER : [];
+                var cm = ml.find(function(m) { return m.name === name; });
+                if (cm) code = cm.code;
+            }
+            if (!customerMap[name]) {
+                customerMap[name] = { name: name, code: code || '9999', entries: [], total: 0 };
+            }
+            var amt = parseNum(c.amount);
+            customerMap[name].total += amt;
+            customerMap[name].entries.push({
+                station: stName,
+                fuelType: c.fuelType,
+                liters: parseNum(c.liters),
+                amount: amt,
+                refNo: c.refNo || '',
+                licensePlate: c.licensePlate || ''
+            });
+        });
+    });
+
+    var customers = Object.values(customerMap);
+    if (customers.length === 0) { showToast('ไม่พบรายการลูกหนี้เงินเชื่อในวันที่เลือก', 'error'); return; }
+
+    // Sort by customer code
+    customers.sort(function(a, b) { return (a.code || '9999').localeCompare(b.code || '9999'); });
+
+    var grandTotal = 0;
+    var rows = '';
+    var idx = 0;
+    customers.forEach(function(cust) {
+        grandTotal += cust.total;
+        if (cust.entries.length === 1) {
+            var e = cust.entries[0];
+            idx++;
+            rows += '<tr>'
+                + '<td style="text-align:center">' + idx + '</td>'
+                + '<td style="text-align:center">' + cust.code + '</td>'
+                + '<td>' + cust.name + '</td>'
+                + '<td>' + e.station + '</td>'
+                + '<td>' + (REF.fuelTypeLabels[e.fuelType] || e.fuelType || '-') + '</td>'
+                + '<td style="text-align:right">' + fmt(e.liters) + '</td>'
+                + '<td>' + (e.refNo || '-') + '</td>'
+                + '<td>' + (e.licensePlate || '-') + '</td>'
+                + '<td style="text-align:right;font-weight:bold">' + fmt(e.amount) + '</td>'
+                + '</tr>';
+        } else {
+            // Multiple entries - show each then subtotal
+            cust.entries.forEach(function(e, ei) {
+                if (ei === 0) idx++;
+                rows += '<tr>'
+                    + '<td style="text-align:center">' + (ei === 0 ? idx : '') + '</td>'
+                    + '<td style="text-align:center">' + (ei === 0 ? cust.code : '') + '</td>'
+                    + '<td>' + (ei === 0 ? cust.name : '') + '</td>'
+                    + '<td>' + e.station + '</td>'
+                    + '<td>' + (REF.fuelTypeLabels[e.fuelType] || e.fuelType || '-') + '</td>'
+                    + '<td style="text-align:right">' + fmt(e.liters) + '</td>'
+                    + '<td>' + (e.refNo || '-') + '</td>'
+                    + '<td>' + (e.licensePlate || '-') + '</td>'
+                    + '<td style="text-align:right">' + fmt(e.amount) + '</td>'
+                    + '</tr>';
+            });
+            rows += '<tr style="background:#f0f0f0;font-weight:bold">'
+                + '<td colspan="8" style="text-align:right">รวม ' + cust.name + '</td>'
+                + '<td style="text-align:right">' + fmt(cust.total) + '</td>'
+                + '</tr>';
+        }
+    });
+
+    var printHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>สรุปลูกหนี้เงินเชื่อรายวัน</title>'
+        + '<style>'
+        + 'body{font-family:"Sarabun",sans-serif;font-size:11px;margin:0;padding:8px 15px;color:#333}'
+        + '#content{transform-origin:top left}'
+        + '.header{text-align:center;margin-bottom:8px;border-bottom:2px solid #333;padding-bottom:6px}'
+        + '.header h2{margin:0;font-size:15px}'
+        + '.header .date{font-size:13px;font-weight:bold;margin-top:4px}'
+        + 'table{width:100%;border-collapse:collapse;margin-bottom:8px}'
+        + 'th,td{padding:2px 6px;border:1px solid #ccc;font-size:10px}'
+        + 'th{background:#f5f5f5;font-weight:bold;text-align:left}'
+        + '.total-row{font-weight:bold;background:#e0e0e0}'
+        + '.big-total{font-size:13px;font-weight:bold;padding:4px;margin:4px 0;border:2px solid #333;text-align:center}'
+        + '.signature{margin-top:20px;display:flex;justify-content:space-around}'
+        + '.signature div{text-align:center;width:160px}'
+        + '.signature .line{border-bottom:1px solid #333;height:30px}'
+        + '@media print{body{padding:4px 10px}@page{size:A4;margin:5mm}}'
+        + '</style>'
+        + '<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;700&display=swap" rel="stylesheet">'
+        + '</head><body><div id="content">'
+
+        + '<div class="header">'
+        + '<h2>สรุปรายการลูกหนี้เงินเชื่อรายวัน (ทุกสาขา)</h2>'
+        + '<div class="date">' + formatDateThai(dateStr) + '</div>'
+        + '</div>'
+
+        + '<table>'
+        + '<thead><tr><th style="text-align:center">ลำดับ</th><th style="text-align:center">รหัส</th><th>ชื่อลูกหนี้</th><th>สาขา</th><th>ชนิดน้ำมัน</th><th style="text-align:right">ลิตร</th><th>เลขที่อ้างอิง</th><th>ทะเบียนรถ</th><th style="text-align:right">จำนวนเงิน</th></tr></thead>'
+        + '<tbody>' + rows
+        + '<tr class="total-row"><td colspan="8" style="text-align:right">รวมทั้งหมด (' + customers.length + ' ราย)</td><td style="text-align:right">' + fmt(grandTotal) + '</td></tr>'
+        + '</tbody></table>'
+
+        + '<div class="big-total">ยอดเงินเชื่อรวม: ' + fmt(grandTotal) + ' บาท</div>'
+
+        + '<div class="signature">'
+        + '<div><div class="line"></div><div>ผู้จัดทำ</div></div>'
+        + '<div><div class="line"></div><div>ผู้ตรวจสอบ</div></div>'
+        + '<div><div class="line"></div><div>ผู้อนุมัติ</div></div>'
+        + '</div>'
+        + '</div>'
+        + '<script>'
+        + 'window.addEventListener("load",function(){'
+        + 'var c=document.getElementById("content");'
+        + 'var pageH=1045;'
+        + 'var h=c.scrollHeight;'
+        + 'if(h>pageH){'
+        + 'var s=pageH/h;'
+        + 'c.style.transform="scale("+s+")";'
+        + 'c.style.transformOrigin="top left";'
+        + 'c.style.width=(100/s)+"%";'
+        + '}'
+        + 'setTimeout(function(){window.print();},300);'
+        + '});'
+        + '<\/script>'
+        + '</body></html>';
+
+    var printWin = window.open('', '_blank');
+    printWin.document.write(printHtml);
+    printWin.document.close();
+}
+
 function renderCreditManagement() {
     const container = document.getElementById('creditManagementSection');
     if (!container) return;
@@ -5987,6 +6131,15 @@ function renderCreditManagement() {
         paginationHtml += '<button class="pagination-btn' + (curPage >= totalPages - 1 ? ' disabled' : '') + '" onclick="window._creditPage=' + (curPage + 1) + ';renderCreditManagement()"' + (curPage >= totalPages - 1 ? ' disabled' : '') + '>ถัดไป &raquo;</button>';
         paginationHtml += '</div>';
     }
+
+    // Daily credit print section
+    html += '<div class="card" style="margin-bottom:16px">'
+        + '<div class="card-header"><h3>🖨️ พิมพ์ใบสรุปลูกหนี้รายวัน (ทุกสาขา)</h3></div>'
+        + '<div style="display:flex;gap:12px;align-items:flex-end;padding:12px 16px;flex-wrap:wrap">'
+        + '<div class="form-group" style="margin:0"><label style="font-size:12px;margin-bottom:4px">วันที่</label>'
+        + '<input type="date" id="creditDailyPrintDate" value="' + todayStr() + '" style="padding:6px 10px"></div>'
+        + '<button class="btn btn-primary" onclick="printDailyCreditAllStations()">🖨️ พิมพ์ใบสรุปลูกหนี้รายวัน</button>'
+        + '</div></div>';
 
     html += '<div class="card" style="margin-bottom:16px">'
         + '<div class="card-header">'
