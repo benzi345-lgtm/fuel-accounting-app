@@ -5952,44 +5952,14 @@ function printDailyCreditAllStations() {
 
     var grandTotal = 0;
     var rows = '';
-    var idx = 0;
-    customers.forEach(function(cust) {
+    customers.forEach(function(cust, idx) {
         grandTotal += cust.total;
-        if (cust.entries.length === 1) {
-            var e = cust.entries[0];
-            idx++;
-            rows += '<tr>'
-                + '<td style="text-align:center">' + idx + '</td>'
-                + '<td style="text-align:center">' + cust.code + '</td>'
-                + '<td>' + cust.name + '</td>'
-                + '<td>' + e.station + '</td>'
-                + '<td>' + (REF.fuelTypeLabels[e.fuelType] || e.fuelType || '-') + '</td>'
-                + '<td style="text-align:right">' + fmt(e.liters) + '</td>'
-                + '<td>' + (e.refNo || '-') + '</td>'
-                + '<td>' + (e.licensePlate || '-') + '</td>'
-                + '<td style="text-align:right;font-weight:bold">' + fmt(e.amount) + '</td>'
-                + '</tr>';
-        } else {
-            // Multiple entries - show each then subtotal
-            cust.entries.forEach(function(e, ei) {
-                if (ei === 0) idx++;
-                rows += '<tr>'
-                    + '<td style="text-align:center">' + (ei === 0 ? idx : '') + '</td>'
-                    + '<td style="text-align:center">' + (ei === 0 ? cust.code : '') + '</td>'
-                    + '<td>' + (ei === 0 ? cust.name : '') + '</td>'
-                    + '<td>' + e.station + '</td>'
-                    + '<td>' + (REF.fuelTypeLabels[e.fuelType] || e.fuelType || '-') + '</td>'
-                    + '<td style="text-align:right">' + fmt(e.liters) + '</td>'
-                    + '<td>' + (e.refNo || '-') + '</td>'
-                    + '<td>' + (e.licensePlate || '-') + '</td>'
-                    + '<td style="text-align:right">' + fmt(e.amount) + '</td>'
-                    + '</tr>';
-            });
-            rows += '<tr style="background:#f0f0f0;font-weight:bold">'
-                + '<td colspan="8" style="text-align:right">รวม ' + cust.name + '</td>'
-                + '<td style="text-align:right">' + fmt(cust.total) + '</td>'
-                + '</tr>';
-        }
+        rows += '<tr>'
+            + '<td style="text-align:center">' + (idx + 1) + '</td>'
+            + '<td style="text-align:center">' + cust.code + '</td>'
+            + '<td>' + cust.name + '</td>'
+            + '<td style="text-align:right;font-weight:bold">' + fmt(cust.total) + '</td>'
+            + '</tr>';
     });
 
     var printHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>สรุปลูกหนี้เงินเชื่อรายวัน</title>'
@@ -6000,10 +5970,10 @@ function printDailyCreditAllStations() {
         + '.header h2{margin:0;font-size:15px}'
         + '.header .date{font-size:13px;font-weight:bold;margin-top:4px}'
         + 'table{width:100%;border-collapse:collapse;margin-bottom:8px}'
-        + 'th,td{padding:2px 6px;border:1px solid #ccc;font-size:10px}'
+        + 'th,td{padding:3px 8px;border:1px solid #ccc;font-size:11px}'
         + 'th{background:#f5f5f5;font-weight:bold;text-align:left}'
         + '.total-row{font-weight:bold;background:#e0e0e0}'
-        + '.big-total{font-size:13px;font-weight:bold;padding:4px;margin:4px 0;border:2px solid #333;text-align:center}'
+        + '.big-total{font-size:14px;font-weight:bold;padding:6px;margin:6px 0;border:2px solid #333;text-align:center}'
         + '.signature{margin-top:20px;display:flex;justify-content:space-around}'
         + '.signature div{text-align:center;width:160px}'
         + '.signature .line{border-bottom:1px solid #333;height:30px}'
@@ -6018,9 +5988,9 @@ function printDailyCreditAllStations() {
         + '</div>'
 
         + '<table>'
-        + '<thead><tr><th style="text-align:center">ลำดับ</th><th style="text-align:center">รหัส</th><th>ชื่อลูกหนี้</th><th>สาขา</th><th>ชนิดน้ำมัน</th><th style="text-align:right">ลิตร</th><th>เลขที่อ้างอิง</th><th>ทะเบียนรถ</th><th style="text-align:right">จำนวนเงิน</th></tr></thead>'
+        + '<thead><tr><th style="text-align:center;width:50px">ลำดับ</th><th style="text-align:center;width:80px">รหัส</th><th>ชื่อลูกหนี้</th><th style="text-align:right;width:120px">จำนวนเงิน (บาท)</th></tr></thead>'
         + '<tbody>' + rows
-        + '<tr class="total-row"><td colspan="8" style="text-align:right">รวมทั้งหมด (' + customers.length + ' ราย)</td><td style="text-align:right">' + fmt(grandTotal) + '</td></tr>'
+        + '<tr class="total-row"><td colspan="3" style="text-align:right">รวมทั้งหมด (' + customers.length + ' ราย)</td><td style="text-align:right">' + fmt(grandTotal) + '</td></tr>'
         + '</tbody></table>'
 
         + '<div class="big-total">ยอดเงินเชื่อรวม: ' + fmt(grandTotal) + ' บาท</div>'
