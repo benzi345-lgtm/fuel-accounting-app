@@ -2826,6 +2826,37 @@ function onStationChange(existingRecord) {
         }
     }
 
+    // Always sync meter start from previous day's end (ensure continuity)
+    {
+        const currentDate = document.getElementById('entryDate').value;
+        const prevData = getPreviousDayData(stationId, currentDate);
+        if (prevData.meterReadings && Object.keys(prevData.meterReadings).length > 0) {
+            Object.keys(prevData.meterReadings).forEach(meterId => {
+                const prevStart = prevData.meterReadings[meterId].start; // this is prev day's end
+                if (prevStart !== '' && prevStart !== undefined && prevStart !== null) {
+                    if (!formData.meterReadings[meterId]) {
+                        formData.meterReadings[meterId] = { start: prevStart, end: '' };
+                    } else {
+                        formData.meterReadings[meterId].start = prevStart;
+                    }
+                }
+            });
+        }
+        // Also sync stock opening from previous day
+        if (prevData.stockEntries && Object.keys(prevData.stockEntries).length > 0) {
+            Object.keys(prevData.stockEntries).forEach(tankKey => {
+                const prevOpening = prevData.stockEntries[tankKey].openingStock;
+                if (prevOpening !== '' && prevOpening !== undefined && prevOpening !== null && parseNum(prevOpening) > 0) {
+                    if (!formData.stockEntries[tankKey]) {
+                        formData.stockEntries[tankKey] = { openingStock: prevOpening, fuelAdded: '', actualDip: '' };
+                    } else {
+                        formData.stockEntries[tankKey].openingStock = prevOpening;
+                    }
+                }
+            });
+        }
+    }
+
     // If loaded record has no meaningful product stock, supplement from carryover
     const hasRealProductStock = Object.values(formData.productStockEntries).some(s =>
         parseNum(s.openingStock) > 0 || parseNum(s.actualCount) > 0 || parseNum(s.received) > 0
