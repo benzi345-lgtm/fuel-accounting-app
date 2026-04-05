@@ -1943,7 +1943,7 @@ function showRecordSummaryPopup(stationId, date) {
     var creditCustHtml = '';
     (record.creditCustomers || []).forEach(function(c) {
         creditCustHtml += '<tr><td>' + (c.name || '-') + '</td>'
-            + '<td>' + (REF.fuelTypeLabels[c.fuelType] || c.fuelType || '-') + '</td>'
+            + '<td>' + getCreditItemLabel(c.fuelType) + '</td>'
             + '<td class="number">' + fmt(c.liters) + '</td>'
             + '<td class="number">' + fmt(c.amount) + '</td>'
             + '<td>' + (c.refNo || '-') + '</td></tr>';
@@ -3298,7 +3298,7 @@ function printStockSummary() {
         grandReceived += d.received;
         var varColor = d.variance >= 0 ? '#10b981' : '#ef4444';
         summaryRows += '<tr>'
-            + '<td>' + (REF.fuelTypeLabels[ft] || ft) + '</td>'
+            + '<td>' + getCreditItemLabel(ft) + '</td>'
             + '<td style="text-align:right">' + fmt(d.openStock) + '</td>'
             + '<td style="text-align:right">' + fmt(d.received) + '</td>'
             + '<td style="text-align:right;font-weight:bold">' + fmt(d.liters) + '</td>'
@@ -3958,8 +3958,8 @@ function renderCreditTab() {
                         <th>ชื่อลูกหนี้</th>
                         <th>เลขที่อ้างอิง</th>
                         <th>ทะเบียนรถ</th>
-                        <th>ชนิดน้ำมัน</th>
-                        <th class="number">ลิตร</th>
+                        <th>ชนิดน้ำมัน/สินค้า</th>
+                        <th class="number">ลิตร/จำนวน</th>
                         <th class="number">จำนวนเงิน (บาท)</th>
                         <th></th>
                     </tr>
@@ -3975,10 +3975,15 @@ function renderCreditTab() {
             <td>
                 <select data-idx="${idx}" onchange="updateCreditRow(this, 'fuelType')">
                     <option value="">-- เลือก --</option>
+                    <optgroup label="น้ำมัน">
                     ${fuelTypes.map(([key, label]) => `<option value="${key}" ${key === item.fuelType ? 'selected' : ''}>${label}</option>`).join('')}
+                    </optgroup>
+                    <optgroup label="สินค้า/น้ำมันเครื่อง">
+                    ${REF.products.map(p => `<option value="product:${p.id}" ${'product:' + p.id === item.fuelType ? 'selected' : ''}>${p.name}</option>`).join('')}
+                    </optgroup>
                 </select>
             </td>
-            <td class="number"><input type="number" step="0.01" value="${item.liters || ''}" data-idx="${idx}" onchange="updateCreditRow(this, 'liters')"></td>
+            <td class="number"><input type="number" step="0.01" value="${item.liters || ''}" data-idx="${idx}" onchange="updateCreditRow(this, 'liters')" placeholder="${(item.fuelType || '').startsWith('product:') ? 'จำนวน' : 'ลิตร'}"></td>
             <td class="number"><input type="number" step="0.01" value="${item.amount || ''}" data-idx="${idx}" onchange="updateCreditRow(this, 'amount')"></td>
             <td><button class="btn-delete-row" onclick="removeCreditRow(${idx})">&#10005;</button></td>
         </tr>`;
@@ -4049,6 +4054,16 @@ function matchCreditByCode(input) {
     }
 }
 
+function getCreditItemLabel(fuelType) {
+    if (!fuelType) return '-';
+    if (fuelType.startsWith('product:')) {
+        var prodId = fuelType.replace('product:', '');
+        var prod = REF.products.find(function(p) { return p.id === prodId; });
+        return prod ? prod.name : fuelType;
+    }
+    return REF.fuelTypeLabels[fuelType] || fuelType || '-';
+}
+
 function updateCreditRow(input, field) {
     const idx = parseInt(input.dataset.idx);
     // Store numeric fields as numbers, not strings
@@ -4067,10 +4082,24 @@ function updateCreditRow(input, field) {
 
     const item = formData.creditCustomers[idx];
     const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPrices();
-    const price = parseNum(fuelPrices[item.fuelType]);
+    // Get price: fuel price or product price
+    let price = 0;
+    if ((item.fuelType || '').startsWith('product:')) {
+        const prodId = item.fuelType.replace('product:', '');
+        const prod = REF.products.find(p => p.id === prodId);
+        if (prod) price = prod.price;
+    } else {
+        price = parseNum(fuelPrices[item.fuelType]);
+    }
     const row = input.closest('tr');
 
-    // Auto-calculate amount from liters when liters or fuelType changes
+    // When fuelType changes, update placeholder
+    if (field === 'fuelType' && row) {
+        const litInput = row.querySelector('input[onchange*="\'liters\'"]');
+        if (litInput) litInput.placeholder = (item.fuelType || '').startsWith('product:') ? 'จำนวน' : 'ลิตร';
+    }
+
+    // Auto-calculate amount from liters/qty when liters or fuelType changes
     if (field === 'liters' || field === 'fuelType') {
         if (price > 0 && parseNum(item.liters) > 0) {
             const calcAmount = Math.round(parseNum(item.liters) * price * 100) / 100;
@@ -4082,7 +4111,7 @@ function updateCreditRow(input, field) {
         }
     }
 
-    // Reverse-calculate liters from amount when amount changes
+    // Reverse-calculate liters/qty from amount when amount changes
     if (field === 'amount') {
         if (price > 0 && parseNum(item.amount) > 0) {
             const calcLiters = Math.round(parseNum(item.amount) / price * 100) / 100;
@@ -4334,8 +4363,8 @@ function printCreditCustomers() {
             + '<td>' + (c.name || '-') + '</td>'
             + '<td>' + (c.refNo || '-') + '</td>'
             + '<td>' + (c.licensePlate || '-') + '</td>'
-            + '<td>' + (REF.fuelTypeLabels[c.fuelType] || c.fuelType || '-') + '</td>'
-            + '<td style="text-align:right">' + (fuelPrices[c.fuelType] ? fmt(fuelPrices[c.fuelType]) : '-') + '</td>'
+            + '<td>' + getCreditItemLabel(c.fuelType) + '</td>'
+            + '<td style="text-align:right">' + (function(){ if ((c.fuelType||'').startsWith('product:')) { var pr = REF.products.find(function(p){return p.id===c.fuelType.replace('product:','');}); return pr ? fmt(pr.price) : '-'; } return fuelPrices[c.fuelType] ? fmt(fuelPrices[c.fuelType]) : '-'; })() + '</td>'
             + '<td style="text-align:right">' + fmt(lit) + '</td>'
             + '<td style="text-align:right;font-weight:bold">' + fmt(amt) + '</td>'
             + '</tr>';
@@ -4354,7 +4383,7 @@ function printCreditCustomers() {
     Object.keys(byFuel).forEach(function(ft) {
         var d = byFuel[ft];
         fuelSummaryRows += '<tr>'
-            + '<td>' + (REF.fuelTypeLabels[ft] || ft) + '</td>'
+            + '<td>' + getCreditItemLabel(ft) + '</td>'
             + '<td style="text-align:right">' + d.count + '</td>'
             + '<td style="text-align:right">' + fmt(d.liters) + '</td>'
             + '<td style="text-align:right;font-weight:bold">' + fmt(d.amount) + '</td>'
@@ -4769,7 +4798,7 @@ function printDailySummary() {
     // Credit customers
     var creditRows = '';
     (formData.creditCustomers || []).forEach(function(c) {
-        creditRows += '<tr><td>' + (c.name || '-') + '</td><td>' + (REF.fuelTypeLabels[c.fuelType] || '-') + '</td><td style="text-align:right">' + fmt(c.liters) + '</td><td style="text-align:right">' + fmt(c.amount) + '</td></tr>';
+        creditRows += '<tr><td>' + (c.name || '-') + '</td><td>' + getCreditItemLabel(c.fuelType) + '</td><td style="text-align:right">' + fmt(c.liters) + '</td><td style="text-align:right">' + fmt(c.amount) + '</td></tr>';
     });
 
     // Build fuel sales rows
