@@ -6146,10 +6146,9 @@ function printDailyCreditAllStations() {
     var allRecords = DB.getAllRecords();
     var dayRecords = allRecords.filter(function(r) { return r.date === dateStr; });
 
-    // Build all individual entries sorted by customer code
-    var allEntries = [];
+    // Aggregate by customer: merge all stations into one total per customer
+    var customerMap = {};
     dayRecords.forEach(function(r) {
-        var stName = getStationName(r.stationId);
         (r.creditCustomers || []).forEach(function(c) {
             var name = (c.name || '').trim();
             if (!name) return;
@@ -6159,132 +6158,71 @@ function printDailyCreditAllStations() {
                 var cm = ml.find(function(m) { return m.name === name; });
                 if (cm) code = cm.code;
             }
-            allEntries.push({
-                code: code || '9999',
-                name: name,
-                station: stName,
-                refNo: c.refNo || '',
-                licensePlate: c.licensePlate || '',
-                fuelType: c.fuelType || '',
-                amount: parseNum(c.amount)
-            });
+            var key = name;
+            if (!customerMap[key]) {
+                customerMap[key] = { code: code || '9999', name: name, total: 0 };
+            }
+            customerMap[key].total += parseNum(c.amount);
         });
     });
 
-    if (allEntries.length === 0) { showToast('ไม่พบรายการลูกหนี้เงินเชื่อในวันที่เลือก', 'error'); return; }
+    var customers = Object.values(customerMap);
+    if (customers.length === 0) { showToast('ไม่พบรายการลูกหนี้เงินเชื่อในวันที่เลือก', 'error'); return; }
 
     // Sort by customer code
-    allEntries.sort(function(a, b) { return (a.code).localeCompare(b.code); });
-
-    // Group by station for subtotals
-    var byStation = {};
-    allEntries.forEach(function(e) {
-        if (!byStation[e.station]) byStation[e.station] = [];
-        byStation[e.station].push(e);
-    });
+    customers.sort(function(a, b) { return (a.code).localeCompare(b.code); });
 
     var grandTotal = 0;
     var rows = '';
-    var seqNo = 0;
-    var stationNames = Object.keys(byStation);
-
-    stationNames.forEach(function(stName) {
-        var entries = byStation[stName];
-        var stTotal = 0;
-        // Station group header
-        rows += '<tr><td colspan="7" style="padding:8px 0 2px;font-weight:bold;font-size:14px;border-bottom:none">' + stName + '</td></tr>';
-
-        entries.forEach(function(e) {
-            seqNo++;
-            stTotal += e.amount;
-            var seqStr = String(seqNo).padStart(4, '0');
-            rows += '<tr>'
-                + '<td>' + seqStr + '</td>'
-                + '<td>' + formatDateThai(dateStr) + '</td>'
-                + '<td style="text-align:center">' + e.code + '</td>'
-                + '<td>' + e.name + '</td>'
-                + '<td>' + e.licensePlate + '</td>'
-                + '<td style="text-align:right">' + fmt(e.amount) + '</td>'
-                + '</tr>';
-        });
-
-        grandTotal += stTotal;
-        rows += '<tr class="subtotal-row">'
-            + '<td colspan="5" style="text-align:right;padding-right:16px">รวม</td>'
-            + '<td style="text-align:right"><span class="oval">' + fmt(stTotal) + '</span></td>'
-            + '</tr>';
+    customers.forEach(function(cust) {
+        grandTotal += cust.total;
+        rows += '<div class="row">'
+            + '<span class="code">' + cust.code + '</span>'
+            + '<span class="name">' + cust.name + '</span>'
+            + '<span class="amt">' + fmt(cust.total) + '</span>'
+            + '</div>';
     });
 
-    var now = new Date();
-    var printTime = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0') + ':' + String(now.getSeconds()).padStart(2,'0');
-    var printDate = formatDateThai(now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0'));
-
-    var printHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>รายงานขายเงินเชื่อรายวัน</title>'
+    var printHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>สรุปลูกหนี้เงินเชื่อรายวัน</title>'
         + '<style>'
-        + 'body{font-family:"Sarabun",sans-serif;font-size:13px;margin:0;padding:20px 30px;color:#333}'
+        + 'body{font-family:"Sarabun",sans-serif;margin:0;padding:20px 30px;color:#333}'
         + '#content{transform-origin:top left}'
-        + '.report-header{text-align:center;margin-bottom:4px}'
-        + '.report-header h2{margin:0;font-size:18px;font-weight:bold}'
-        + '.report-header .sub{font-size:14px;margin-top:2px}'
-        + '.meta{font-size:12px;margin-bottom:6px;line-height:1.6}'
-        + '.meta-row{display:flex;gap:30px}'
-        + '.page-no{text-align:right;font-size:12px;margin-bottom:2px}'
-        + 'table{width:100%;border-collapse:collapse}'
-        + 'thead th{text-align:left;font-size:12px;font-weight:bold;padding:4px 6px;border-bottom:2px solid #333;border-top:1px solid #333}'
-        + 'thead th.r{text-align:right}'
-        + 'tbody td{padding:3px 6px;font-size:13px;border-bottom:1px solid #eee}'
-        + '.subtotal-row td{border-bottom:none;padding-top:6px;font-weight:bold;font-size:13px}'
-        + '.grand-total{display:flex;justify-content:flex-end;align-items:center;gap:16px;margin-top:16px;font-size:15px;font-weight:bold}'
-        + '.oval{display:inline-block;border:2px solid #c00;border-radius:50%;padding:2px 14px;font-weight:bold}'
-        + '.signature{margin-top:40px;display:flex;justify-content:space-around}'
-        + '.signature div{text-align:center;width:160px}'
-        + '.signature .line{border-bottom:1px solid #333;height:35px}'
-        + '@media print{body{padding:10px 20px}@page{size:A4;margin:10mm}}'
+        + '.report-header{text-align:center;margin-bottom:16px}'
+        + '.report-header h2{margin:0;font-size:40px;font-weight:bold}'
+        + '.report-header .date{font-size:30px;font-weight:bold;margin-top:8px}'
+        + '.row{display:flex;align-items:baseline;padding:4px 0;border-bottom:1px dotted #ccc;font-size:30px}'
+        + '.row .code{width:120px;flex-shrink:0}'
+        + '.row .name{flex:1}'
+        + '.row .amt{text-align:right;font-weight:bold;white-space:nowrap;padding-right:40px}'
+        + '.total-line{display:flex;align-items:baseline;padding:12px 0 0;margin-top:8px;border-top:2px solid #333;font-size:34px;font-weight:bold}'
+        + '.total-line .label{flex:1;text-align:right}'
+        + '.total-line .amt{text-align:right;white-space:nowrap;padding-right:40px}'
+        + '.total-line .oval{display:inline-block;border:2px solid #c00;border-radius:50%;padding:2px 20px}'
+        + '@media print{body{padding:15px 25px}@page{size:A4;margin:8mm}}'
         + '</style>'
         + '<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;700&display=swap" rel="stylesheet">'
         + '</head><body><div id="content">'
 
         // Header
         + '<div class="report-header">'
-        + '<h2>รายงานลูกหนี้เงินเชื่อ (ทุกสาขา)</h2>'
-        + '<div class="sub">เรียงตามรหัสลูกค้า</div>'
+        + '<h2>สรุปลูกหนี้เงินเชื่อรายวัน</h2>'
+        + '<div class="date">' + formatDateThai(dateStr) + '</div>'
         + '</div>'
 
-        // Meta info
-        + '<div class="meta">'
-        + '<div class="meta-row"><span>ข้อมูลวันที่: ' + formatDateThai(dateStr) + '</span></div>'
-        + '<div class="meta-row"><span>วันที่พิมพ์: ' + printDate + '</span><span>' + printTime + '</span></div>'
-        + '</div>'
-
-        // Page number
-        + '<div class="page-no">หน้า: 1 / 1</div>'
-
-        // Table
-        + '<table>'
-        + '<thead><tr>'
-        + '<th style="width:50px">ลำดับ</th>'
-        + '<th style="width:110px">วันที่ขาย</th>'
-        + '<th style="width:70px;text-align:center">รหัสลูกค้า</th>'
-        + '<th>ชื่อลูกค้า</th>'
-        + '<th style="width:90px">ทะเบียนรถ</th>'
-        + '<th class="r" style="width:100px">มูลค่าสินค้า</th>'
-        + '</tr></thead>'
-        + '<tbody>' + rows + '</tbody></table>'
+        // Rows
+        + rows
 
         // Grand total
-        + '<div class="grand-total"><span>รวมทั้งหมด</span><span class="oval">' + fmt(grandTotal) + '</span></div>'
-
-        // Signature
-        + '<div class="signature">'
-        + '<div><div class="line"></div><div>ผู้จัดทำ</div></div>'
-        + '<div><div class="line"></div><div>ผู้ตรวจสอบ</div></div>'
-        + '<div><div class="line"></div><div>ผู้อนุมัติ</div></div>'
+        + '<div class="total-line">'
+        + '<span class="label">รวมทั้งหมด (' + customers.length + ' ราย)</span>'
+        + '<span class="amt"><span class="oval">' + fmt(grandTotal) + '</span></span>'
         + '</div>'
+
         + '</div>'
         + '<script>'
         + 'window.addEventListener("load",function(){'
         + 'var c=document.getElementById("content");'
-        + 'var pageH=1045;'
+        + 'var pageH=1080;'
         + 'var h=c.scrollHeight;'
         + 'if(h>pageH){'
         + 'var s=pageH/h;'
