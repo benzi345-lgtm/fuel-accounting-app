@@ -6802,29 +6802,67 @@ function renderTaxReports(el) {
 
 // Helper: create print overlay with pages, auto-zoom to fit A4 landscape, then print
 function doPrintOverlay(pagesHtml) {
-    const overlay = document.createElement('div');
-    overlay.id = 'tax-print-overlay';
-    overlay.innerHTML = pagesHtml.map(h => `<div class="print-page">${h}</div>`).join('');
-    document.body.appendChild(overlay);
+    var content = pagesHtml.join('');
+    var printHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>รายงานภาษี</title>'
+        + '<style>'
+        + '@page{size:A4 landscape;margin:5mm}'
+        + 'body{font-family:"Sarabun",sans-serif;font-size:11px;margin:0;padding:8px 12px;color:#333}'
+        + '#content{transform-origin:top left}'
+        + '.tax-report{padding:0;margin:0;border:none}'
+        + '.tax-report-header{text-align:center;margin-bottom:8px}'
+        + '.tax-report-header h2{font-size:14px;font-weight:700;margin:0 0 4px}'
+        + '.tax-report-meta{font-size:11px;line-height:1.4;text-align:left}'
+        + '.tax-report-meta p{margin:0}'
+        + '.tax-report-meta-toprow{display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-bottom:2px}'
+        + '.tax-report-section-label{display:inline-block;border:2px solid #333;font-weight:700;padding:1px 12px;border-radius:3px;font-size:13px}'
+        + '.tax-report-table{border-collapse:collapse;font-size:11px;margin-top:6px;table-layout:auto;width:100%}'
+        + '.tax-report-table th,.tax-report-table td{border:1px solid #999;padding:2px 4px;text-align:center;white-space:nowrap}'
+        + '.tax-report-table th{background:#f0f0f0;font-weight:600;font-size:10px}'
+        + '.tax-report-table td.number{text-align:right;font-variant-numeric:tabular-nums}'
+        + '.tax-report-table .tax-summary-row{background:#f0f0f0;font-weight:600}'
+        + '.tax-report-table .tax-summary-row td{border-top:2px solid #666}'
+        + '.tax-report-table .summary-label{text-align:left;white-space:nowrap;font-size:10px}'
+        + '.tax-report-table .col-no{width:28px}'
+        + '.tax-report-vat-totals{margin-top:6px;padding:4px 10px;font-size:11px}'
+        + '.vat-detail-row{display:flex;align-items:baseline;gap:6px;padding:2px 0}'
+        + '.vat-detail-row span:first-child{min-width:220px}'
+        + '.vat-detail-row strong{min-width:80px;text-align:right;font-variant-numeric:tabular-nums}'
+        + '.tax-report-bottom-section{display:flex;gap:10px;margin-top:8px;align-items:flex-start}'
+        + '.tax-report-invoices{flex:1;min-width:0}'
+        + '.invoice-section-title{font-size:10px;font-weight:600;margin:6px 0 2px}'
+        + '.invoice-detail-table{width:100%;border-collapse:collapse;font-size:10px}'
+        + '.invoice-detail-table td{padding:2px 4px;border:1px solid #999;white-space:nowrap}'
+        + '.invoice-detail-table td.inv-val{min-width:30px;text-align:center;font-weight:600}'
+        + '.tax-report-prices{flex-shrink:0;width:160px;padding:6px 8px;background:#f5f5f5;border-radius:4px;border:1px solid #ccc}'
+        + '.tax-report-prices h4{font-size:11px;font-weight:600;margin:0 0 4px}'
+        + '.tax-report-prices p{font-size:10px;margin:2px 0;display:flex;justify-content:space-between;gap:4px}'
+        + '.tax-report-prices .price-label{font-weight:600}'
+        + '.tax-report-prices .price-value{text-align:right}'
+        + '.report-b-table td:first-child,.report-b-table th:first-child{text-align:left;white-space:normal}'
+        + '</style>'
+        + '<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;700&display=swap" rel="stylesheet">'
+        + '</head><body><div id="content">'
+        + content
+        + '</div>'
+        + '<script>'
+        + 'window.addEventListener("load",function(){'
+        + 'var c=document.getElementById("content");'
+        + 'var pageW=1085;var pageH=740;'
+        + 'var w=c.scrollWidth;var h=c.scrollHeight;'
+        + 'var scale=Math.min(1,pageW/w,pageH/h);'
+        + 'if(scale<1){'
+        + 'c.style.transform="scale("+scale+")";'
+        + 'c.style.transformOrigin="top left";'
+        + 'c.style.width=(100/scale)+"%";'
+        + '}'
+        + 'setTimeout(function(){window.print();},300);'
+        + '});'
+        + '<\/script>'
+        + '</body></html>';
 
-    const pageW = 1085; // 287mm printable (landscape)
-    const pageH = 756;  // 200mm printable (landscape)
-    requestAnimationFrame(() => {
-        overlay.querySelectorAll('.print-page .tax-report').forEach(rpt => {
-            // Reset any previous zoom
-            rpt.style.zoom = '1';
-            rpt.style.transformOrigin = 'top left';
-            const scaleW = pageW / rpt.scrollWidth;
-            const scaleH = pageH / rpt.scrollHeight;
-            const scale = Math.min(1, scaleW, scaleH);
-            rpt.style.transform = 'scale(' + scale + ')';
-            rpt.style.width = (100 / scale) + '%';
-        });
-        requestAnimationFrame(() => {
-            window.print();
-            document.body.removeChild(overlay);
-        });
-    });
+    var printWin = window.open('', '_blank');
+    printWin.document.write(printHtml);
+    printWin.document.close();
 }
 
 function printTaxReport() {
