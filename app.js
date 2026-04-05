@@ -3922,7 +3922,7 @@ function renderCreditTab() {
     const el = document.getElementById('subtab-credit');
     if (!el) return;
     const fuelTypes = Object.entries(REF.fuelTypeLabels);
-    const masterList = (typeof CREDIT_CUSTOMERS_MASTER !== 'undefined') ? CREDIT_CUSTOMERS_MASTER : [];
+    const masterList = getCreditMasterList();
 
     // Blocked customer warnings (show at top)
     const warnings = [];
@@ -4023,7 +4023,7 @@ function removeCreditRow(idx) {
 function matchCreditCustomer(input) {
     const idx = parseInt(input.dataset.idx);
     const val = input.value.trim();
-    const masterList = (typeof CREDIT_CUSTOMERS_MASTER !== 'undefined') ? CREDIT_CUSTOMERS_MASTER : [];
+    const masterList = getCreditMasterList();
     const match = masterList.find(c => c.name === val);
     const row = input.closest('tr');
     const codeInput = row ? row.querySelector('.credit-cus-code') : null;
@@ -4040,7 +4040,7 @@ function matchCreditCustomer(input) {
 function matchCreditByCode(input) {
     const idx = parseInt(input.dataset.idx);
     const val = input.value.trim();
-    const masterList = (typeof CREDIT_CUSTOMERS_MASTER !== 'undefined') ? CREDIT_CUSTOMERS_MASTER : [];
+    const masterList = getCreditMasterList();
     const match = masterList.find(c => c.code === val);
     const row = input.closest('tr');
     const nameInput = row ? row.querySelector('.credit-cus-name') : null;
@@ -4052,6 +4052,60 @@ function matchCreditByCode(input) {
         formData.creditCustomers[idx].name = '';
         if (nameInput) nameInput.value = '';
     }
+}
+
+function getCreditMasterList() {
+    var base = (typeof CREDIT_CUSTOMERS_MASTER !== 'undefined') ? CREDIT_CUSTOMERS_MASTER : [];
+    var custom = [];
+    try { custom = JSON.parse(localStorage.getItem('customCreditCustomers') || '[]'); } catch(e) {}
+    // Merge: base + custom, deduplicate by code
+    var map = {};
+    base.forEach(function(c) { map[c.code] = c; });
+    custom.forEach(function(c) { map[c.code] = c; });
+    return Object.values(map).sort(function(a, b) { return (a.code || '').localeCompare(b.code || ''); });
+}
+
+function addCustomCreditCustomer(code, name) {
+    if (!code || !name) { showToast('กรุณากรอกรหัสและชื่อลูกหนี้', 'error'); return; }
+    var custom = [];
+    try { custom = JSON.parse(localStorage.getItem('customCreditCustomers') || '[]'); } catch(e) {}
+    // Check duplicate
+    var existing = custom.find(function(c) { return c.code === code; });
+    if (existing) {
+        existing.name = name;
+    } else {
+        custom.push({ code: code, name: name });
+    }
+    localStorage.setItem('customCreditCustomers', JSON.stringify(custom));
+    showToast('เพิ่มลูกหนี้ ' + code + ' - ' + name + ' สำเร็จ', 'success');
+}
+
+function renderCustomCusList() {
+    var el = document.getElementById('customCusList');
+    if (!el) return;
+    var custom = [];
+    try { custom = JSON.parse(localStorage.getItem('customCreditCustomers') || '[]'); } catch(e) {}
+    if (custom.length === 0) {
+        el.innerHTML = '<div style="color:#999;font-size:12px">ยังไม่มีรายชื่อลูกหนี้ที่เพิ่มเอง</div>';
+        return;
+    }
+    custom.sort(function(a, b) { return (a.code || '').localeCompare(b.code || ''); });
+    var html = '<div style="font-size:12px;color:#666;margin-bottom:6px">รายชื่อที่เพิ่มเอง (' + custom.length + ' ราย)</div>';
+    html += '<div style="max-height:200px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px">';
+    html += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th style="padding:4px 8px;background:#f5f5f5;text-align:left;border-bottom:1px solid #ddd">รหัส</th><th style="padding:4px 8px;background:#f5f5f5;text-align:left;border-bottom:1px solid #ddd">ชื่อลูกหนี้</th><th style="padding:4px 8px;background:#f5f5f5;width:50px;border-bottom:1px solid #ddd"></th></tr></thead><tbody>';
+    custom.forEach(function(c) {
+        html += '<tr><td style="padding:3px 8px;border-bottom:1px solid #eee">' + c.code + '</td><td style="padding:3px 8px;border-bottom:1px solid #eee">' + c.name + '</td><td style="padding:3px 8px;border-bottom:1px solid #eee;text-align:center"><button class="btn-delete-row" onclick="removeCustomCreditCustomer(\'' + c.code + '\');renderCustomCusList()">✕</button></td></tr>';
+    });
+    html += '</tbody></table></div>';
+    el.innerHTML = html;
+}
+
+function removeCustomCreditCustomer(code) {
+    var custom = [];
+    try { custom = JSON.parse(localStorage.getItem('customCreditCustomers') || '[]'); } catch(e) {}
+    custom = custom.filter(function(c) { return c.code !== code; });
+    localStorage.setItem('customCreditCustomers', JSON.stringify(custom));
+    showToast('ลบลูกหนี้รหัส ' + code + ' แล้ว', 'success');
 }
 
 function getCreditItemLabel(fuelType) {
@@ -5628,7 +5682,7 @@ let creditSummaryState = {
 
 // Scan all records to build unique customer name list for autocomplete
 function onCreditSummaryCustomerFilter(val) {
-    const masterList = (typeof CREDIT_CUSTOMERS_MASTER !== 'undefined') ? CREDIT_CUSTOMERS_MASTER : [];
+    const masterList = getCreditMasterList();
     // If user typed a code, convert to customer name
     const matchByCode = masterList.find(c => c.code === val.trim());
     if (matchByCode) {
@@ -5698,7 +5752,7 @@ function renderCreditSummary(el) {
                     oninput="onCreditSummaryCustomerFilter(this.value)"
                     placeholder="ทุกราย (พิมพ์ชื่อหรือรหัสเพื่อค้นหา)">
                 <datalist id="creditSummaryCustomerList">
-                    ${(typeof CREDIT_CUSTOMERS_MASTER !== 'undefined' ? CREDIT_CUSTOMERS_MASTER : []).map(c => `<option value="${c.name}" label="${c.code} - ${c.name}">`).join('')}
+                    ${getCreditMasterList().map(c => `<option value="${c.name}" label="${c.code} - ${c.name}">`).join('')}
                 </datalist>
             </div>
             <div class="form-group">
@@ -5721,8 +5775,22 @@ function renderCreditSummary(el) {
             <button class="btn btn-primary" onclick="printDailyCreditAllStations()">🖨️ พิมพ์ใบสรุปลูกหนี้รายวัน</button>
         </div>
     </div>
+    <div class="card" style="margin-top:12px">
+        <div class="card-header"><h3>➕ จัดการรายชื่อลูกหนี้</h3></div>
+        <div style="padding:12px 16px">
+            <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px">
+                <div class="form-group" style="margin:0"><label style="font-size:12px;margin-bottom:4px">รหัสลูกหนี้</label>
+                <input type="text" id="newCusCode" placeholder="เช่น 2001" style="padding:6px 10px;width:100px"></div>
+                <div class="form-group" style="margin:0"><label style="font-size:12px;margin-bottom:4px">ชื่อลูกหนี้</label>
+                <input type="text" id="newCusName" placeholder="ชื่อลูกหนี้" style="padding:6px 10px;width:200px"></div>
+                <button class="btn btn-primary" onclick="var c=document.getElementById('newCusCode').value.trim(),n=document.getElementById('newCusName').value.trim();addCustomCreditCustomer(c,n);document.getElementById('newCusCode').value='';document.getElementById('newCusName').value='';renderCustomCusList()">เพิ่มลูกหนี้</button>
+            </div>
+            <div id="customCusList"></div>
+        </div>
+    </div>
     <div id="creditSummaryResult"></div>
     <div id="creditManagementSection"></div>`;
+    renderCustomCusList();
     renderCreditManagement();
 }
 
@@ -5759,7 +5827,7 @@ function generateCreditSummary() {
                     if (st.fuelTypeFilter && item.fuelType !== st.fuelTypeFilter) return;
                     const key = name.toLowerCase();
                     if (!customerMap[key]) {
-                        const _ml = (typeof CREDIT_CUSTOMERS_MASTER !== 'undefined') ? CREDIT_CUSTOMERS_MASTER : [];
+                        const _ml = getCreditMasterList();
                         const _cm = _ml.find(c => c.name === name);
                         customerMap[key] = { displayName: name, code: _cm ? _cm.code : '9999', totalAmount: 0, totalLiters: 0, entries: [] };
                     }
@@ -6022,7 +6090,7 @@ function getCreditOutstandingByCustomer() {
             const name = (c.name || '').trim();
             if (!name) return;
             if (!customerMap[name]) {
-                const _ml = (typeof CREDIT_CUSTOMERS_MASTER !== 'undefined') ? CREDIT_CUSTOMERS_MASTER : [];
+                const _ml = getCreditMasterList();
                 const _cm = _ml.find(m => m.name === name);
                 customerMap[name] = { name, code: (_cm ? _cm.code : c.cusCode) || '9999', totalCredit: 0, totalPaid: 0, entries: [], payments: [], oldestUnpaidDate: null };
             }
@@ -6087,7 +6155,7 @@ function printDailyCreditAllStations() {
             if (!name) return;
             var code = c.cusCode || '';
             if (!code) {
-                var ml = (typeof CREDIT_CUSTOMERS_MASTER !== 'undefined') ? CREDIT_CUSTOMERS_MASTER : [];
+                var ml = getCreditMasterList();
                 var cm = ml.find(function(m) { return m.name === name; });
                 if (cm) code = cm.code;
             }
@@ -6429,7 +6497,7 @@ function showCustomerCreditDetail(customerName) {
 
 // Payment form modal
 function showPaymentForm(customerName) {
-    const masterList = (typeof CREDIT_CUSTOMERS_MASTER !== 'undefined') ? CREDIT_CUSTOMERS_MASTER : [];
+    const masterList = getCreditMasterList();
     const nameOptions = getAllCreditCustomerNames().map(n => `<option value="${n}">`).join('');
     const codeOptions = masterList.map(c => `<option value="${c.code}">${c.name}</option>`).join('');
     const match = customerName ? masterList.find(c => c.name === customerName) : null;
