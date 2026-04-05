@@ -1401,12 +1401,13 @@ tfoot td {
     border-collapse: collapse;
     font-size: 12px;
     margin-top: 12px;
-    table-layout: fixed;
+    table-layout: auto;
+    width: 100%;
 }
-.tax-report-table .col-no-width { width: 40px; }
-.tax-report-table .col-meter { width: 75px; }
-.tax-report-table .col-liters { width: 80px; }
-.tax-report-table .col-baht { width: 80px; }
+.tax-report-table .col-no-width { width: 30px; }
+.tax-report-table .col-meter { }
+.tax-report-table .col-liters { }
+.tax-report-table .col-baht { }
 .tax-report-table th,
 .tax-report-table td {
     border: 1px solid var(--gray-300);

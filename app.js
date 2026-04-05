@@ -6807,12 +6807,18 @@ function doPrintOverlay(pagesHtml) {
     overlay.innerHTML = pagesHtml.map(h => `<div class="print-page">${h}</div>`).join('');
     document.body.appendChild(overlay);
 
-    const pageW = 1085; // 287mm printable
-    const pageH = 756;  // 200mm printable
+    const pageW = 1085; // 287mm printable (landscape)
+    const pageH = 756;  // 200mm printable (landscape)
     requestAnimationFrame(() => {
         overlay.querySelectorAll('.print-page .tax-report').forEach(rpt => {
-            const scale = Math.min(1, pageW / rpt.scrollWidth, pageH / rpt.scrollHeight);
-            rpt.style.zoom = scale;
+            // Reset any previous zoom
+            rpt.style.zoom = '1';
+            rpt.style.transformOrigin = 'top left';
+            const scaleW = pageW / rpt.scrollWidth;
+            const scaleH = pageH / rpt.scrollHeight;
+            const scale = Math.min(1, scaleW, scaleH);
+            rpt.style.transform = 'scale(' + scale + ')';
+            rpt.style.width = (100 / scale) + '%';
         });
         requestAnimationFrame(() => {
             window.print();
@@ -6826,15 +6832,13 @@ function printTaxReport() {
     if (!stationId) { showToast('กรุณาเลือกสถานี', 'error'); return; }
 
     if (type === 'A') {
-        // Report A: 2 pages (split tank groups)
-        const page1 = generateReportA(stationId, date, { page: 1 });
-        const page2 = generateReportA(stationId, date, { page: 2 });
-        doPrintOverlay([page1, page2]);
+        // Report A: all tanks in single page
+        const html = generateReportA(stationId, date, null);
+        doPrintOverlay([html]);
     } else if (type === 'A-monthly') {
-        // Report A Monthly: 2 pages
-        const page1 = generateReportAMonthly(stationId, month, { page: 1 });
-        const page2 = generateReportAMonthly(stationId, month, { page: 2 });
-        doPrintOverlay([page1, page2]);
+        // Report A Monthly: single page
+        const html = generateReportAMonthly(stationId, month, null);
+        doPrintOverlay([html]);
     } else if (type === 'B') {
         // Report B: 1 page
         const html = generateReportB(stationId, date);
