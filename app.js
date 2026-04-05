@@ -671,6 +671,27 @@ const DB = {
         this._backupRecords();
         this._syncRecord(record);
     },
+    // 3-way merge: compare local changes vs original, merge with server
+    _mergeRecord(local, serverRow, original) {
+        if (!serverRow || !original) return local; // no server data, just use local
+        var server = this._fromDb(serverRow);
+        var mergeFields = ['meterReadings','stockEntries','productSales','productStockEntries',
+            'taxInvoices','expenses','creditCardEntries','bluecardEntries',
+            'creditCustomers','finance','fuelPrices','internalUsage'];
+        var merged = JSON.parse(JSON.stringify(local));
+        mergeFields.forEach(function(field) {
+            var localVal = JSON.stringify(local[field] || null);
+            var origVal = JSON.stringify(original[field] || null);
+            var serverVal = JSON.stringify(server[field] || null);
+            if (localVal === origVal && serverVal !== origVal) {
+                // Local didn't change but server did → use server
+                merged[field] = JSON.parse(serverVal);
+            }
+            // If local changed → keep local (already in merged)
+            // If both changed → keep local (last edit wins for that section)
+        });
+        return merged;
+    },
     async _syncRecord(record) {
         try {
             // Ensure session is still valid before syncing
@@ -684,7 +705,28 @@ const DB = {
                     return;
                 }
             }
-            const dbData = this._toDb(record);
+
+            // Fetch latest server version for merge
+            var mergedRecord = record;
+            try {
+                var { data: serverRows } = await supabaseClient
+                    .from('daily_records')
+                    .select('*')
+                    .eq('station_id', record.stationId)
+                    .eq('record_date', record.date)
+                    .limit(1);
+                if (serverRows && serverRows.length > 0 && window._originalSnapshot) {
+                    mergedRecord = this._mergeRecord(record, serverRows[0], window._originalSnapshot);
+                    // Update local cache with merged data
+                    var key = record.stationId + '_' + record.date;
+                    this._cache[key] = mergedRecord;
+                    this._backupRecords();
+                }
+            } catch (mergeErr) {
+                console.warn('Merge fetch failed, saving local version:', mergeErr);
+            }
+
+            const dbData = this._toDb(mergedRecord);
             let { error } = await supabaseClient
                 .from('daily_records')
                 .upsert(dbData, { onConflict: 'station_id,record_date' });
@@ -699,6 +741,10 @@ const DB = {
                 }
             }
             if (error) { console.error('Sync failed:', error); showToast('Sync: ' + error.message, 'error'); }
+            else {
+                // Update snapshot after successful save
+                window._originalSnapshot = JSON.parse(JSON.stringify(mergedRecord));
+            }
         } catch (e) { console.error('Sync error:', e); }
     },
     getAllRecords() {
@@ -2875,6 +2921,9 @@ function onStationChange(existingRecord) {
             formData.stockEntries[tank.key] = { openingStock: '', fuelAdded: '', truckCode: '', actualDip: '' };
         }
     });
+
+    // Save original snapshot for merge detection
+    window._originalSnapshot = JSON.parse(JSON.stringify(formData));
 
     // Track current station/date for auto-save on switch
     _currentEntryStation = stationId;
