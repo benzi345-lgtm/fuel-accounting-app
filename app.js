@@ -5766,7 +5766,7 @@ function renderCreditSummary(el) {
             <button class="btn btn-primary" onclick="printDailyCreditAllStations()">🖨️ พิมพ์ใบสรุปลูกหนี้รายวัน</button>
         </div>
     </div>
-    <div class="card" style="margin-top:12px">
+    ${Auth.isAdmin() ? `<div class="card" style="margin-top:12px">
         <div class="card-header"><h3>➕ จัดการรายชื่อลูกหนี้</h3></div>
         <div style="padding:12px 16px">
             <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px">
@@ -5778,10 +5778,10 @@ function renderCreditSummary(el) {
             </div>
             <div id="customCusList"></div>
         </div>
-    </div>
+    </div>` : ''}
     <div id="creditSummaryResult"></div>
     <div id="creditManagementSection"></div>`;
-    renderCustomCusList();
+    if (Auth.isAdmin()) renderCustomCusList();
     renderCreditManagement();
 }
 
