@@ -6237,10 +6237,13 @@ function renderCreditManagement() {
 
     let html = '';
 
-    // 1. Overdue alerts
+    // 1. Overdue alerts (collapsible)
     if (overdue.length > 0) {
         html += `<div class="card credit-alert-card" style="margin-bottom:16px;border-left:4px solid #ef4444">
-            <div class="card-header"><h3 style="color:#ef4444">⚠️ แจ้งเตือน: ลูกหนี้ค้างชำระเกิน ${settings.overdueDays || 30} วัน (${overdue.length} ราย)</h3></div>
+            <div class="card-header" style="cursor:pointer" onclick="var el=document.getElementById('overdueList');el.style.display=el.style.display==='none'?'':'none';this.querySelector('.toggle').textContent=el.style.display==='none'?'▶':'▼'">
+                <h3 style="color:#ef4444"><span class="toggle">▶</span> ⚠️ แจ้งเตือน: ลูกหนี้ค้างชำระเกิน ${settings.overdueDays || 30} วัน (${overdue.length} ราย)</h3>
+            </div>
+            <div id="overdueList" style="display:none">
             <div class="table-wrapper"><table>
                 <thead><tr><th>รหัส</th><th>ชื่อลูกหนี้</th><th class="number">ยอดค้างชำระ</th><th class="number">ค้างมา (วัน)</th><th>วันที่เก่าสุด</th><th>สถานะ</th></tr></thead>
                 <tbody>${overdue.map(c => `<tr style="background:#fef2f2">
@@ -6250,14 +6253,18 @@ function renderCreditManagement() {
                     <td>${c.isBlocked ? '<span style="background:#ef4444;color:white;padding:2px 8px;border-radius:4px;font-size:11px">งดเติม</span>' : ''}</td>
                 </tr>`).join('')}</tbody>
             </table></div>
+            </div>
         </div>`;
     }
 
-    // 2. Blocked customers (over limit)
+    // 2. Blocked customers (over limit, collapsible)
     const overLimitOnly = blocked.filter(c => c.isOverLimit && !c.isOverdue);
     if (overLimitOnly.length > 0) {
         html += `<div class="card" style="margin-bottom:16px;border-left:4px solid #f59e0b">
-            <div class="card-header"><h3 style="color:#f59e0b">⛔ งดเติม: เกินวงเงินเครดิต (${overLimitOnly.length} ราย)</h3></div>
+            <div class="card-header" style="cursor:pointer" onclick="var el=document.getElementById('overLimitList');el.style.display=el.style.display==='none'?'':'none';this.querySelector('.toggle').textContent=el.style.display==='none'?'▶':'▼'">
+                <h3 style="color:#f59e0b"><span class="toggle">▶</span> ⛔ งดเติม: เกินวงเงินเครดิต (${overLimitOnly.length} ราย)</h3>
+            </div>
+            <div id="overLimitList" style="display:none">
             <div class="table-wrapper"><table>
                 <thead><tr><th>รหัส</th><th>ชื่อลูกหนี้</th><th class="number">ยอดค้างชำระ</th><th class="number">วงเงิน</th><th class="number">เกินวงเงิน</th></tr></thead>
                 <tbody>${overLimitOnly.map(c => `<tr style="background:#fffbeb">
@@ -6266,6 +6273,7 @@ function renderCreditManagement() {
                     <td class="number" style="color:#f59e0b;font-weight:600">${fmt(c.outstanding - c.creditLimit)}</td>
                 </tr>`).join('')}</tbody>
             </table></div>
+            </div>
         </div>`;
     }
 
