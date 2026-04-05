@@ -3932,11 +3932,17 @@ function renderCreditTab() {
     });
     let warningHtml = '';
     if (warnings.length > 0) {
-        warningHtml = '<div style="margin-bottom:12px">' + warnings.map(w =>
-            '<div class="card" style="padding:10px 14px;margin-bottom:6px;border-left:4px solid ' + (w.type === 'danger' ? '#ef4444' : '#f59e0b') + ';background:' + (w.type === 'danger' ? '#fef2f2' : '#fffbeb') + '">'
-            + '<strong>' + w.name + '</strong>: ' + w.msg
-            + '</div>'
-        ).join('') + '</div>';
+        warningHtml = '<div style="margin-bottom:12px">'
+            + '<div class="card" style="padding:0;border-left:4px solid #f59e0b;background:#fffbeb">'
+            + '<div style="padding:10px 14px;cursor:pointer;font-weight:bold" onclick="var el=document.getElementById(\'creditWarningList\');el.style.display=el.style.display===\'none\'?\'\':\'none\';this.querySelector(\'.toggle\').textContent=el.style.display===\'none\'?\'▶\':\'▼\'">'
+            + '<span class="toggle">▶</span> ⚠️ แจ้งเตือนลูกหนี้เกินวงเงิน (' + warnings.length + ' ราย)</div>'
+            + '<div id="creditWarningList" style="display:none">'
+            + warnings.map(w =>
+                '<div style="padding:8px 14px;border-top:1px solid #fde68a;border-left:4px solid ' + (w.type === 'danger' ? '#ef4444' : '#f59e0b') + ';background:' + (w.type === 'danger' ? '#fef2f2' : '#fffbeb') + '">'
+                + '<strong>' + w.name + '</strong>: ' + w.msg
+                + '</div>'
+            ).join('')
+            + '</div></div></div>';
     }
 
     let html = warningHtml + `<div class="card">
