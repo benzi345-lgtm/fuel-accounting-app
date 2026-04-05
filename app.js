@@ -4153,9 +4153,9 @@ function renderTaxInvoiceTab() {
         return html;
     }
 
-    el.innerHTML =
-        renderInvoiceSection('abbreviated', 'ใบกำกับภาษีอย่างย่อ', 'ตามมาตรา 86/6 แห่งประมวลรัษฎากร (จากการขายน้ำมันผ่านมิเตอร์หัวจ่าย)', inv.abbreviated) +
-        renderInvoiceSection('full', 'ใบกำกับภาษีเต็มรูปแบบ', 'ตามมาตรา 86/4 แห่งประมวลรัษฎากร', inv.full);
+    el.innerHTML = '<div style="text-align:right;margin-bottom:12px"><button class="btn btn-sm btn-primary" onclick="printTaxInvoiceSummary()">🖨️ พิมพ์รายงานใบกำกับภาษี</button></div>'
+        + renderInvoiceSection('abbreviated', 'ใบกำกับภาษีอย่างย่อ', 'ตามมาตรา 86/6 แห่งประมวลรัษฎากร (จากการขายน้ำมันผ่านมิเตอร์หัวจ่าย)', inv.abbreviated)
+        + renderInvoiceSection('full', 'ใบกำกับภาษีเต็มรูปแบบ', 'ตามมาตรา 86/4 แห่งประมวลรัษฎากร', inv.full);
 }
 
 function addTaxInvoiceRow(type) {
@@ -4173,6 +4173,140 @@ function updateTaxInvoice(input) {
     const { type, idx, field } = input.dataset;
     formData.taxInvoices[type][parseInt(idx)][field] = field === 'copies' || field === 'amount' ? parseNum(input.value) : input.value;
     renderTaxInvoiceTab();
+}
+
+function printTaxInvoiceSummary() {
+    var stationId = document.getElementById('entryStation').value;
+    var dateStr = document.getElementById('entryDate').value;
+    if (!stationId || !dateStr) return;
+
+    var station = REF.stations.find(function(s) { return s.id === stationId; });
+    var inv = formData.taxInvoices || { abbreviated: [], full: [] };
+
+    if ((inv.abbreviated || []).length === 0 && (inv.full || []).length === 0) {
+        showToast('ไม่มีรายการใบกำกับภาษี', 'error'); return;
+    }
+
+    function buildSection(items, title, subtitle) {
+        if (!items || items.length === 0) return '';
+        var totalAmt = 0, totalVat = 0, totalCopies = 0;
+        var rows = '';
+        items.forEach(function(item, i) {
+            var amt = parseNum(item.amount);
+            var vat = amt > 0 ? Math.round((amt / 1.07 * 0.07) * 100) / 100 : 0;
+            var copies = parseNum(item.copies) || 1;
+            totalAmt += amt;
+            totalVat += vat;
+            totalCopies += copies;
+            rows += '<tr>'
+                + '<td style="text-align:center">' + (i + 1) + '</td>'
+                + '<td style="text-align:center">' + (item.bookNo || '-') + '</td>'
+                + '<td style="text-align:center">' + (item.invoiceNo || '-') + '</td>'
+                + '<td style="text-align:right">' + copies + '</td>'
+                + '<td style="text-align:right">' + fmt(amt) + '</td>'
+                + '<td style="text-align:right">' + fmt(vat) + '</td>'
+                + '<td style="text-align:right">' + fmt(amt - vat) + '</td>'
+                + '</tr>';
+        });
+        rows += '<tr style="font-weight:bold;background:#f0f0f0">'
+            + '<td colspan="3" style="text-align:right">รวม</td>'
+            + '<td style="text-align:right">' + totalCopies + '</td>'
+            + '<td style="text-align:right">' + fmt(totalAmt) + '</td>'
+            + '<td style="text-align:right">' + fmt(totalVat) + '</td>'
+            + '<td style="text-align:right">' + fmt(totalAmt - totalVat) + '</td>'
+            + '</tr>';
+        return '<div class="section-title">' + title + '</div>'
+            + '<div style="color:#666;font-size:10px;margin-bottom:4px">' + subtitle + '</div>'
+            + '<table><thead><tr>'
+            + '<th style="text-align:center;width:40px">ลำดับ</th>'
+            + '<th style="text-align:center">เล่มที่</th>'
+            + '<th style="text-align:center">เลขที่</th>'
+            + '<th style="text-align:right">จำนวน (ฉบับ)</th>'
+            + '<th style="text-align:right">จำนวนเงินรวม VAT</th>'
+            + '<th style="text-align:right">VAT (บาท)</th>'
+            + '<th style="text-align:right">จำนวนเงินก่อน VAT</th>'
+            + '</tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+
+    var abbrHtml = buildSection(inv.abbreviated, 'ใบกำกับภาษีอย่างย่อ', 'ตามมาตรา 86/6 แห่งประมวลรัษฎากร (จากการขายน้ำมันผ่านมิเตอร์หัวจ่าย)');
+    var fullHtml = buildSection(inv.full, 'ใบกำกับภาษีเต็มรูปแบบ', 'ตามมาตรา 86/4 แห่งประมวลรัษฎากร');
+
+    // Grand total
+    var allItems = (inv.abbreviated || []).concat(inv.full || []);
+    var grandAmt = 0, grandVat = 0;
+    allItems.forEach(function(item) {
+        var amt = parseNum(item.amount);
+        var vat = amt > 0 ? Math.round((amt / 1.07 * 0.07) * 100) / 100 : 0;
+        grandAmt += amt;
+        grandVat += vat;
+    });
+
+    var printHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>รายงานใบกำกับภาษี</title>'
+        + '<style>'
+        + 'body{font-family:"Sarabun",sans-serif;font-size:12px;margin:0;padding:10px 20px;color:#333}'
+        + '#content{transform-origin:top left}'
+        + '.header{text-align:center;margin-bottom:10px;border-bottom:2px solid #333;padding-bottom:8px}'
+        + '.header h2{margin:0;font-size:16px}'
+        + '.header h3{margin:2px 0;font-size:11px;font-weight:normal;color:#666}'
+        + '.header .date{font-size:13px;font-weight:bold;margin-top:4px}'
+        + 'table{width:100%;border-collapse:collapse;margin-bottom:10px}'
+        + 'th,td{padding:4px 8px;border:1px solid #ccc;font-size:12px}'
+        + 'th{background:#f5f5f5;font-weight:bold;text-align:left}'
+        + '.section-title{font-weight:bold;font-size:13px;margin:10px 0 3px;padding:3px 0;border-bottom:1px solid #999}'
+        + '.big-total{font-size:13px;font-weight:bold;padding:6px;margin:6px 0;border:2px solid #333;text-align:center}'
+        + '.summary-box{display:flex;justify-content:space-around;margin:8px 0}'
+        + '.summary-box div{text-align:center;padding:6px 16px;border:1px solid #ccc;border-radius:4px}'
+        + '.summary-box .label{font-size:10px;color:#666}'
+        + '.summary-box .value{font-size:14px;font-weight:bold}'
+        + '.signature{margin-top:20px;display:flex;justify-content:space-around}'
+        + '.signature div{text-align:center;width:160px}'
+        + '.signature .line{border-bottom:1px solid #333;height:30px}'
+        + '@media print{body{padding:6px 15px}@page{size:A4 landscape;margin:5mm}}'
+        + '</style>'
+        + '<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;700&display=swap" rel="stylesheet">'
+        + '</head><body><div id="content">'
+
+        + '<div class="header">'
+        + '<h2>' + (station ? station.businessName : '') + '</h2>'
+        + '<h3>' + (station ? station.address : '') + '</h3>'
+        + '<h3>เลขประจำตัวผู้เสียภาษี: ' + (station ? station.taxId : '') + '</h3>'
+        + '<div class="date">รายงานสรุปใบกำกับภาษี (ส่วน ก): ' + formatDateThai(dateStr) + '</div>'
+        + '</div>'
+
+        + abbrHtml
+        + fullHtml
+
+        + '<div class="summary-box">'
+        + '<div><div class="label">จำนวนเงินรวม VAT</div><div class="value">' + fmt(grandAmt) + '</div></div>'
+        + '<div><div class="label">ภาษีมูลค่าเพิ่ม (VAT)</div><div class="value">' + fmt(grandVat) + '</div></div>'
+        + '<div><div class="label">จำนวนเงินก่อน VAT</div><div class="value">' + fmt(grandAmt - grandVat) + '</div></div>'
+        + '</div>'
+
+        + '<div class="signature">'
+        + '<div><div class="line"></div><div>ผู้จัดทำ</div></div>'
+        + '<div><div class="line"></div><div>ผู้ตรวจสอบ</div></div>'
+        + '<div><div class="line"></div><div>ผู้อนุมัติ</div></div>'
+        + '</div>'
+        + '</div>'
+        + '<script>'
+        + 'window.addEventListener("load",function(){'
+        + 'var c=document.getElementById("content");'
+        + 'var pageH=700;'
+        + 'var h=c.scrollHeight;'
+        + 'if(h>pageH){'
+        + 'var s=pageH/h;'
+        + 'c.style.transform="scale("+s+")";'
+        + 'c.style.transformOrigin="top left";'
+        + 'c.style.width=(100/s)+"%";'
+        + '}'
+        + 'setTimeout(function(){window.print();},300);'
+        + '});'
+        + '<\/script>'
+        + '</body></html>';
+
+    var printWin = window.open('', '_blank');
+    printWin.document.write(printHtml);
+    printWin.document.close();
 }
 
 function printCreditCustomers() {
