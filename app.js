@@ -15,6 +15,7 @@ const REF = {
         { id: 'ST12', name: 'ศรีสะเกษทวีชัย', businessName: 'ห้างหุ้นส่วนจำกัด ศรีสะเกษทวีชัย', taxId: '0 3335 4700 0073', address: '175 หมู่ที่ 4 ต.ขะยูง อ.อุทุมพรพิสัย จ.ศรีสะเกษ 33120' },
         { id: 'ST13', name: 'ทวีคูณออยล์', businessName: 'ห้างหุ้นส่วนจำกัด ทวีคูณออยล์', taxId: '0 3435 4600 0479', address: '119 หมู่ที่ 7 ต.หนองครก อ.เมืองศรีสะเกษ จ.ศรีสะเกษ 33000' },
         { id: 'ST14', name: 'ศรีสะเกษดาวนิภา', businessName: 'ห้างหุ้นส่วนจำกัด ศรีสะเกษดาวนิภา', taxId: '0 3335 4500 0513', address: '83 หมู่ที่ 6 ต.โพธิ์ อ.เมืองศรีสะเกษ จ.ศรีสะเกษ 33000' },
+        { id: 'ST15', name: 'ทองอยู่โฮลดิ้ง หัวกรอก', businessName: 'บริษัท ทองอยู่โฮลดิ้ง จำกัด (หัวกรอก)', taxId: '0 3355 6800 0341', address: '349 หมู่ที่ 5 ต.หนองครก อ.เมืองศรีสะเกษ จ.ศรีสะเกษ 33000' },
     ],
     staff: [
         { id: 'S01', name: 'ขวัญ' },
@@ -31,10 +32,10 @@ const REF = {
     tanks: [
         { key: 'ST01-D-01', stationId: 'ST01', fuelType: 'Diesel', label: 'ถังดีเซล (1)', capacity: 15000 },
         { key: 'ST01-D-02', stationId: 'ST01', fuelType: 'Diesel', label: 'ถังดีเซล (2)', capacity: 15000 },
-        { key: 'ST01-D-03', stationId: 'ST01', fuelType: 'Diesel', label: 'ถังดีเซล (8+10)', capacity: 30000 },
+        { key: 'ST01-D-03', stationId: 'ST15', fuelType: 'Diesel', label: 'ถังดีเซล (8+10)', capacity: 30000 },
         { key: 'ST01-G95-01', stationId: 'ST01', fuelType: 'Gasohol 95', label: 'ถังแก๊ส 95 (1)', capacity: 10000 },
-        { key: 'ST01-G95-02', stationId: 'ST01', fuelType: 'Gasohol 95', label: 'ถังแก๊ส 95 (2)', capacity: 10000 },
-        { key: 'ST01-G95-03', stationId: 'ST01', fuelType: 'Gasohol 95', label: 'ถังแก๊ส 95 (ก)', capacity: 10000 },
+        { key: 'ST01-G95-02', stationId: 'ST15', fuelType: 'Gasohol 95', label: 'ถังแก๊ส 95 (2)', capacity: 10000 },
+        { key: 'ST01-G95-03', stationId: 'ST15', fuelType: 'Gasohol 95', label: 'ถังแก๊ส 95 (ก)', capacity: 10000 },
         { key: 'ST01-B95-01', stationId: 'ST01', fuelType: 'Benzyne 95', label: 'ถังเบนซิน 95 (1)', capacity: 10000 },
         { key: 'ST01-G91-01', stationId: 'ST01', fuelType: 'Gasohol 91', label: 'ถังแก๊ส 91 (1)', capacity: 10000 },
         { key: 'ST02-LPG-01', stationId: 'ST02', fuelType: 'LPG', label: 'ถังแอลพีจี (1)', capacity: 0 },
