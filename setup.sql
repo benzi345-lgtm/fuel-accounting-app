@@ -114,3 +114,12 @@ CREATE TABLE IF NOT EXISTS app_settings (
 );
 ALTER TABLE app_settings ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "app_settings_all" ON app_settings FOR ALL TO authenticated USING (true);
+
+-- Custom credit customers (shared across all users)
+CREATE TABLE IF NOT EXISTS custom_credit_customers (
+    code TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE custom_credit_customers ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "custom_cus_all" ON custom_credit_customers FOR ALL TO authenticated USING (true);

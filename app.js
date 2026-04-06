@@ -4133,10 +4133,12 @@ function matchCreditByCode(input) {
     }
 }
 
+// Cache for custom customers from Supabase
+var _customCreditCustomersCache = null;
+
 function getCreditMasterList() {
     var base = (typeof CREDIT_CUSTOMERS_MASTER !== 'undefined') ? CREDIT_CUSTOMERS_MASTER : [];
-    var custom = [];
-    try { custom = JSON.parse(localStorage.getItem('customCreditCustomers') || '[]'); } catch(e) {}
+    var custom = _customCreditCustomersCache || [];
     // Merge: base + custom, deduplicate by code
     var map = {};
     base.forEach(function(c) { map[c.code] = c; });
@@ -4144,47 +4146,61 @@ function getCreditMasterList() {
     return Object.values(map).sort(function(a, b) { return (a.code || '').localeCompare(b.code || ''); });
 }
 
-function addCustomCreditCustomer(code, name) {
+async function loadCustomCreditCustomers() {
+    try {
+        var { data, error } = await supabaseClient.from('custom_credit_customers').select('*').order('code');
+        if (!error && data) {
+            _customCreditCustomersCache = data;
+        }
+    } catch(e) {}
+    // Also migrate localStorage data to Supabase if exists
+    try {
+        var local = JSON.parse(localStorage.getItem('customCreditCustomers') || '[]');
+        if (local.length > 0) {
+            for (var i = 0; i < local.length; i++) {
+                await supabaseClient.from('custom_credit_customers').upsert({ code: local[i].code, name: local[i].name }, { onConflict: 'code' });
+            }
+            localStorage.removeItem('customCreditCustomers');
+            // Reload from Supabase
+            var { data: d2 } = await supabaseClient.from('custom_credit_customers').select('*').order('code');
+            if (d2) _customCreditCustomersCache = d2;
+        }
+    } catch(e) {}
+}
+
+async function addCustomCreditCustomer(code, name) {
     if (!code || !name) { showToast('กรุณากรอกรหัสและชื่อลูกหนี้', 'error'); return; }
-    var custom = [];
-    try { custom = JSON.parse(localStorage.getItem('customCreditCustomers') || '[]'); } catch(e) {}
-    // Check duplicate
-    var existing = custom.find(function(c) { return c.code === code; });
-    if (existing) {
-        existing.name = name;
-    } else {
-        custom.push({ code: code, name: name });
-    }
-    localStorage.setItem('customCreditCustomers', JSON.stringify(custom));
+    var { error } = await supabaseClient.from('custom_credit_customers').upsert({ code: code, name: name }, { onConflict: 'code' });
+    if (error) { showToast('เกิดข้อผิดพลาด: ' + error.message, 'error'); return; }
     showToast('เพิ่มลูกหนี้ ' + code + ' - ' + name + ' สำเร็จ', 'success');
+    await loadCustomCreditCustomers();
+    renderCustomCusList();
 }
 
 function renderCustomCusList() {
     var el = document.getElementById('customCusList');
     if (!el) return;
-    var custom = [];
-    try { custom = JSON.parse(localStorage.getItem('customCreditCustomers') || '[]'); } catch(e) {}
+    var custom = _customCreditCustomersCache || [];
     if (custom.length === 0) {
         el.innerHTML = '<div style="color:#999;font-size:12px">ยังไม่มีรายชื่อลูกหนี้ที่เพิ่มเอง</div>';
         return;
     }
-    custom.sort(function(a, b) { return (a.code || '').localeCompare(b.code || ''); });
     var html = '<div style="font-size:12px;color:#666;margin-bottom:6px">รายชื่อที่เพิ่มเอง (' + custom.length + ' ราย)</div>';
     html += '<div style="max-height:200px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px">';
     html += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th style="padding:4px 8px;background:#f5f5f5;text-align:left;border-bottom:1px solid #ddd">รหัส</th><th style="padding:4px 8px;background:#f5f5f5;text-align:left;border-bottom:1px solid #ddd">ชื่อลูกหนี้</th><th style="padding:4px 8px;background:#f5f5f5;width:50px;border-bottom:1px solid #ddd"></th></tr></thead><tbody>';
     custom.forEach(function(c) {
-        html += '<tr><td style="padding:3px 8px;border-bottom:1px solid #eee">' + c.code + '</td><td style="padding:3px 8px;border-bottom:1px solid #eee">' + c.name + '</td><td style="padding:3px 8px;border-bottom:1px solid #eee;text-align:center"><button class="btn-delete-row" onclick="removeCustomCreditCustomer(\'' + c.code + '\');renderCustomCusList()">✕</button></td></tr>';
+        html += '<tr><td style="padding:3px 8px;border-bottom:1px solid #eee">' + c.code + '</td><td style="padding:3px 8px;border-bottom:1px solid #eee">' + c.name + '</td><td style="padding:3px 8px;border-bottom:1px solid #eee;text-align:center"><button class="btn-delete-row" onclick="removeCustomCreditCustomer(\'' + c.code + '\')">✕</button></td></tr>';
     });
     html += '</tbody></table></div>';
     el.innerHTML = html;
 }
 
-function removeCustomCreditCustomer(code) {
-    var custom = [];
-    try { custom = JSON.parse(localStorage.getItem('customCreditCustomers') || '[]'); } catch(e) {}
-    custom = custom.filter(function(c) { return c.code !== code; });
-    localStorage.setItem('customCreditCustomers', JSON.stringify(custom));
+async function removeCustomCreditCustomer(code) {
+    var { error } = await supabaseClient.from('custom_credit_customers').delete().eq('code', code);
+    if (error) { showToast('เกิดข้อผิดพลาด: ' + error.message, 'error'); return; }
     showToast('ลบลูกหนี้รหัส ' + code + ' แล้ว', 'success');
+    await loadCustomCreditCustomers();
+    renderCustomCusList();
 }
 
 function getCreditItemLabel(fuelType) {
@@ -5600,6 +5616,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const hasSession = await Auth.checkSession();
     if (hasSession) {
         await DB.init();
+        await loadCustomCreditCustomers();
         showApp();
     } else {
         showLoginPage();
@@ -5664,6 +5681,7 @@ async function handleLogin() {
     try {
         await Auth.signIn(email, password);
         await DB.init();
+        await loadCustomCreditCustomers();
         showApp();
     } catch (e) {
         errorEl.textContent = 'เข้าสู่ระบบไม่สำเร็จ: ' + (e.message || 'ลองอีกครั้ง');
