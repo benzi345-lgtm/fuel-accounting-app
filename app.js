@@ -2905,14 +2905,24 @@ function onStationChange(existingRecord) {
         }
     }
 
-    // If loaded record has no meaningful product stock, supplement from carryover
-    const hasRealProductStock = Object.values(formData.productStockEntries).some(s =>
-        parseNum(s.openingStock) > 0 || parseNum(s.actualCount) > 0 || parseNum(s.received) > 0
-    );
-    if (!hasRealProductStock) {
-        const prevData = getPreviousDayData(stationId, document.getElementById('entryDate').value);
+    // Always sync product stock openingStock from previous day (ensure continuity)
+    {
+        const currentDate = document.getElementById('entryDate').value;
+        const prevData = getPreviousDayData(stationId, currentDate);
         if (Object.keys(prevData.productStockEntries).length > 0) {
-            formData.productStockEntries = prevData.productStockEntries;
+            const currentEntries = formData.productStockEntries || {};
+            // For each product in previous day's carry-over
+            Object.keys(prevData.productStockEntries).forEach(productId => {
+                const prevEntry = prevData.productStockEntries[productId];
+                if (currentEntries[productId]) {
+                    // Update openingStock to match previous day's balance
+                    currentEntries[productId].openingStock = prevEntry.openingStock;
+                } else {
+                    // Product not in current record yet — add it
+                    currentEntries[productId] = { openingStock: prevEntry.openingStock, received: '', actualCount: '' };
+                }
+            });
+            formData.productStockEntries = currentEntries;
         }
     }
 
