@@ -1960,7 +1960,7 @@ function showRecordSummaryPopup(stationId, date) {
     var fin = record.finance || {};
     var otherIncome = parseNum(fin.otherIncome);
     var totalGross = fuelSalesValue + lubricantSales + otherIncome;
-    var creditSales = (record.creditCustomers || []).reduce(function(s, c) { return s + parseNum(c.amount); }, 0);
+    var creditSales = (record.creditCustomers || []).filter(function(c) { return (c.creditType || 'meter') === 'meter'; }).reduce(function(s, c) { return s + parseNum(c.amount); }, 0);
     var creditCard = parseNum(fin.creditCardAmt);
     var bluecard = parseNum(fin.bluecardAmt);
     var qrTransfer = parseNum(fin.qrTransferAmt);
@@ -2730,7 +2730,7 @@ function _autoSaveBeforeSwitch() {
             const price = ft ? parseNum(fuelPrices[ft]) : 0;
             return sum + (parseNum(item.liters) * price);
         }, 0);
-        const creditSalesTotal = (formData.creditCustomers || []).reduce((s, c) => s + parseNum(c.amount), 0);
+        const creditSalesTotal = (formData.creditCustomers || []).filter(c => (c.creditType || 'meter') === 'meter').reduce((s, c) => s + parseNum(c.amount), 0);
         const _ccTotal = (formData.creditCardEntries || []).reduce((s, e) => s + parseNum(e.amount), 0) || parseNum((formData.finance || {}).creditCardAmt);
         const _bcTotal = (formData.bluecardEntries || []).reduce((s, e) => s + parseNum(e.amount), 0) || parseNum((formData.finance || {}).bluecardAmt);
         const fin = formData.finance || {};
@@ -4013,6 +4013,7 @@ function renderCreditTab() {
                     <tr>
                         <th>รหัส</th>
                         <th>ชื่อลูกหนี้</th>
+                        <th>ประเภท</th>
                         <th>เลขที่อ้างอิง</th>
                         <th>ทะเบียนรถ</th>
                         <th>ชนิดน้ำมัน/สินค้า</th>
@@ -4027,6 +4028,12 @@ function renderCreditTab() {
         html += `<tr>
             <td><input type="text" value="${item.cusCode || ''}" data-idx="${idx}" class="credit-cus-code" list="creditCusCodeList" onchange="updateCreditRow(this, 'cusCode')" oninput="matchCreditByCode(this)" placeholder="รหัส" autocomplete="off" style="width:80px;text-align:center"></td>
             <td><input type="text" value="${item.name || ''}" data-idx="${idx}" class="credit-cus-name" list="creditCusList" onchange="updateCreditRow(this, 'name')" oninput="matchCreditCustomer(this)" placeholder="พิมพ์ชื่อเพื่อค้นหา" autocomplete="off"></td>
+            <td>
+                <select data-idx="${idx}" onchange="updateCreditRow(this, 'creditType')" style="font-size:11px;width:90px">
+                    <option value="meter" ${(item.creditType || 'meter') === 'meter' ? 'selected' : ''}>ผ่านมิเตอร์</option>
+                    <option value="external" ${item.creditType === 'external' ? 'selected' : ''}>นอกระบบ</option>
+                </select>
+            </td>
             <td><input type="text" value="${item.refNo || ''}" data-idx="${idx}" onchange="updateCreditRow(this, 'refNo')" placeholder="เลขที่ใบสั่ง"></td>
             <td><input type="text" value="${item.licensePlate || ''}" data-idx="${idx}" onchange="updateCreditRow(this, 'licensePlate')" placeholder="ทะเบียนรถ"></td>
             <td>
@@ -4046,15 +4053,30 @@ function renderCreditTab() {
         </tr>`;
     });
 
-    const totalCredit = formData.creditCustomers.reduce((sum, c) => sum + parseNum(c.amount), 0);
+    const meterItems = formData.creditCustomers.filter(c => (c.creditType || 'meter') === 'meter');
+    const externalItems = formData.creditCustomers.filter(c => c.creditType === 'external');
+    const totalMeter = meterItems.reduce((sum, c) => sum + parseNum(c.amount), 0);
+    const totalExternal = externalItems.reduce((sum, c) => sum + parseNum(c.amount), 0);
+    const totalCredit = totalMeter + totalExternal;
     const totalLiters = formData.creditCustomers.reduce((sum, c) => sum + parseNum(c.liters), 0);
 
     html += `</tbody>
             <tfoot>
                 <tr class="table-row-summary">
-                    <td colspan="2">รวมเงินเชื่อ</td>
-                    <td colspan="3"></td>
-                    <td class="number">${fmt(totalLiters)}</td>
+                    <td colspan="2">รวมผ่านมิเตอร์ (คิดในบัญชี)</td>
+                    <td colspan="4"></td>
+                    <td class="number">${fmt(totalMeter)}</td>
+                    <td></td>
+                </tr>
+                ${totalExternal > 0 ? `<tr class="table-row-summary" style="color:#f59e0b">
+                    <td colspan="2">รวมนอกระบบ (ไม่คิดในบัญชี)</td>
+                    <td colspan="4"></td>
+                    <td class="number">${fmt(totalExternal)}</td>
+                    <td></td>
+                </tr>` : ''}
+                <tr class="table-row-summary">
+                    <td colspan="2">รวมเงินเชื่อทั้งหมด</td>
+                    <td colspan="4"></td>
                     <td class="number">${fmt(totalCredit)}</td>
                     <td></td>
                 </tr>
@@ -4617,8 +4639,9 @@ function renderSummaryTab() {
     const fin = formData.finance;
     const otherIncome = parseNum(fin.otherIncome);
     const totalGross = fuelSalesValue + lubricantSales + otherIncome;
-    // Auto-calculate creditSales from creditCustomers entries
-    const creditSales = formData.creditCustomers.reduce((s, c) => s + parseNum(c.amount), 0);
+    // Auto-calculate creditSales from creditCustomers entries (เฉพาะผ่านมิเตอร์)
+    const creditSales = formData.creditCustomers.filter(c => (c.creditType || 'meter') === 'meter').reduce((s, c) => s + parseNum(c.amount), 0);
+    const creditSalesExternal = formData.creditCustomers.filter(c => c.creditType === 'external').reduce((s, c) => s + parseNum(c.amount), 0);
     // Auto-calculate creditCard and bluecard from entries arrays
     const creditCard = (formData.creditCardEntries || []).reduce((s, e) => s + parseNum(e.amount), 0) || parseNum(fin.creditCardAmt);
     const bluecard = (formData.bluecardEntries || []).reduce((s, e) => s + parseNum(e.amount), 0) || parseNum(fin.bluecardAmt);
@@ -4849,7 +4872,7 @@ function printDailySummary() {
     var fin = formData.finance || {};
     var otherIncome = parseNum(fin.otherIncome);
     var totalGross = fuelSalesValue + lubricantSales + otherIncome;
-    var creditSales = (formData.creditCustomers || []).reduce(function(s, c) { return s + parseNum(c.amount); }, 0);
+    var creditSales = (formData.creditCustomers || []).filter(function(c) { return (c.creditType || 'meter') === 'meter'; }).reduce(function(s, c) { return s + parseNum(c.amount); }, 0);
     var creditCard = (formData.creditCardEntries || []).reduce(function(s, e) { return s + parseNum(e.amount); }, 0) || parseNum(fin.creditCardAmt);
     var bluecard = (formData.bluecardEntries || []).reduce(function(s, e) { return s + parseNum(e.amount); }, 0) || parseNum(fin.bluecardAmt);
     var qrTransfer = parseNum(fin.qrTransferAmt);
@@ -4978,7 +5001,8 @@ function printDailySummary() {
         + '<div>'
         + '<div class="section-title">รายการหัก</div>'
         + '<table>'
-        + '<tr><td>เงินเชื่อ (' + (formData.creditCustomers || []).length + ' ราย)</td><td style="text-align:right">' + fmt(creditSales) + '</td></tr>'
+        + '<tr><td>เงินเชื่อผ่านมิเตอร์ (' + formData.creditCustomers.filter(function(c){return (c.creditType||"meter")==="meter"}).length + ' ราย)</td><td style="text-align:right">' + fmt(creditSales) + '</td></tr>'
+        + (creditSalesExternal > 0 ? '<tr style="color:#f59e0b"><td>เงินเชื่อนอกระบบ (' + formData.creditCustomers.filter(function(c){return c.creditType==="external"}).length + ' ราย) *ไม่คิดในบัญชี</td><td style="text-align:right">' + fmt(creditSalesExternal) + '</td></tr>' : '')
         + '<tr><td>เครดิตการ์ด</td><td style="text-align:right">' + fmt(creditCard) + '</td></tr>'
         + '<tr><td>Bluecard</td><td style="text-align:right">' + fmt(bluecard) + '</td></tr>'
         + '<tr><td>เงินโอน / QR</td><td style="text-align:right">' + fmt(qrTransfer) + '</td></tr>'
@@ -5205,8 +5229,8 @@ function saveCurrentRecord() {
         return sum + (parseNum(item.liters) * price);
     }, 0);
 
-    // Auto-calculate creditSales from creditCustomers entries
-    const creditSalesTotal = formData.creditCustomers.reduce((s, c) => s + parseNum(c.amount), 0);
+    // Auto-calculate creditSales from creditCustomers entries (เฉพาะผ่านมิเตอร์)
+    const creditSalesTotal = formData.creditCustomers.filter(c => (c.creditType || 'meter') === 'meter').reduce((s, c) => s + parseNum(c.amount), 0);
 
     // Auto-calculate creditCard/bluecard from entries
     const creditCardTotal = (formData.creditCardEntries || []).reduce((s, e) => s + parseNum(e.amount), 0) || parseNum(formData.finance.creditCardAmt);
