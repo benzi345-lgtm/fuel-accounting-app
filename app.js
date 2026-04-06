@@ -2675,7 +2675,8 @@ function getPreviousDayData(stationId, dateStr) {
                         const bookBalance = parseNum(s.openingStock) + parseNum(s.received) - sold;
                         let carryValue = parseNum(s.actualCount) > 0 ? parseNum(s.actualCount) : bookBalance;
                         carryValue = Math.round(carryValue * 100) / 100;
-                        if (carryValue > 0) {
+                        // ยกยอดทุกกรณี รวมทั้ง 0 (เพื่อแสดงรายการสินค้าที่เคยมี)
+                        if (carryValue >= 0) {
                             result.productStockEntries[productId] = { openingStock: carryValue, received: '', actualCount: '' };
                         }
                     });
