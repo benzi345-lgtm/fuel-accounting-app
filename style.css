@@ -762,7 +762,7 @@ td input[type="number"] {
 .compare-checkbox:hover { background: var(--gray-50); border-color: var(--primary); }
 .compare-checkbox input:checked + span { color: var(--primary); font-weight: 600; }
 .compare-table { width: 100%; border-collapse: collapse; }
-.compare-table th, .compare-table td { padding: 10px 12px; border-bottom: 1px solid var(--gray-200); white-space: nowrap; }
+.compare-table th, .compare-table td { padding: 3px 10px; border-bottom: 1px solid var(--gray-200); font-size: 14px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; }
 .compare-table thead th { background: #f8fafc; font-weight: 600; position: sticky; top: 0; }
 
 /* Thai date input: native input visible but text transparent, Thai overlay on top */
@@ -1694,6 +1694,54 @@ tfoot td {
 .btn-logout:hover {
     border-color: var(--primary);
     color: var(--primary);
+}
+
+/* Force Sync button (visible to all users) */
+.btn-sync {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: #ecfdf5;
+    border: 1px solid #10b981;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    color: #065f46;
+    transition: all 0.15s;
+    margin-right: 8px;
+}
+.btn-sync:hover {
+    background: #10b981;
+    color: white;
+}
+.btn-sync:active {
+    transform: scale(0.96);
+}
+.btn-sync .sync-icon {
+    font-size: 14px;
+    line-height: 1;
+    display: inline-block;
+}
+.btn-sync.syncing .sync-icon {
+    animation: spin 1s linear infinite;
+}
+.btn-sync.has-pending {
+    background: #fef3c7;
+    border-color: #f59e0b;
+    color: #92400e;
+}
+.btn-sync.has-pending:hover {
+    background: #f59e0b;
+    color: white;
+}
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+@media (max-width: 640px) {
+    .btn-sync .sync-label { display: none; }
+    .btn-sync { padding: 6px 8px; }
 }
 
 /* Section Toggle Grid */

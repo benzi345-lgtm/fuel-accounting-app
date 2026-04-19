@@ -1123,8 +1123,16 @@ const DB = {
     // RLS failures once after another refresh, and bail out loudly when the
     // user is clearly signed out rather than silently logging errors.
     async forceSyncAll() {
+        // Visual feedback: spin the topbar sync icon while running
+        const syncBtn = document.getElementById('syncStatusBtn');
+        if (syncBtn) syncBtn.classList.add('syncing');
+
         const records = Object.values(this._cache);
-        if (records.length === 0) { showToast('ไม่มีข้อมูลใน cache', 'error'); return; }
+        if (records.length === 0) {
+            if (syncBtn) syncBtn.classList.remove('syncing');
+            showToast('ไม่มีข้อมูลใน cache', 'error');
+            return;
+        }
 
         // Step 1: ensure we have a live session before sending N requests
         let sessionOk = false;
@@ -1145,6 +1153,7 @@ const DB = {
         } catch (e) { sessionOk = false; }
 
         if (!sessionOk) {
+            if (syncBtn) syncBtn.classList.remove('syncing');
             showToast('Session หมดอายุ — กรุณา Logout แล้ว Login ใหม่ ก่อนกด Force Sync', 'error');
             return;
         }
@@ -1181,6 +1190,7 @@ const DB = {
                 errors.push({ stationId: rec.stationId, date: rec.date, message: e.message });
             }
         }
+        if (syncBtn) syncBtn.classList.remove('syncing');
         if (fail > 0) {
             console.error('Sync errors:', errors);
             showSyncErrorsModal(ok, fail, errors);
