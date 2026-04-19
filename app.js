@@ -122,7 +122,10 @@ const REF = {
         { id: 'M009', tankKey: 'ST01-D-02', label: 'มือจ่าย 3' },
         { id: 'M010', tankKey: 'ST01-D-02', label: 'มือจ่าย 4' },
         { id: 'M011', tankKey: 'ST01-D-02', label: 'มือจ่าย 5' },
-        { id: 'M012', tankKey: 'ST01-D-02', label: 'มือจ่าย 6' },
+        {
+            id: 'M012',
+            tankKey: 'ST01-D-02', label: 'มือจ่าย 6'
+        },
         { id: 'M013', tankKey: 'ST01-D-03', label: 'มือจ่าย 1' },
         { id: 'M014', tankKey: 'ST01-D-03', label: 'มือจ่าย 2' },
         { id: 'M015', tankKey: 'ST01-D-03', label: 'มือจ่าย 3' },
@@ -511,7 +514,7 @@ function thaiDateInput(id, value, onchangeCode) {
 function formatMonthThai(yearMonth) {
     if (!yearMonth) return '';
     const [y, m] = yearMonth.split('-').map(Number);
-    const thaiMonths = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
+    const thaiMonths = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
     return thaiMonths[m - 1] + ' ' + (y + 543);
 }
 
@@ -543,25 +546,67 @@ const DB = {
 
     // --- Format converters ---
     _fromDb(row) {
+        // Repair: object-with-numeric-keys → array (caused by previous bad merge)
+        function toArr(v) {
+            if (Array.isArray(v)) return v;
+            if (v && typeof v === 'object') {
+                var keys = Object.keys(v);
+                if (keys.length === 0) return [];
+                if (keys.every(function (k) { return /^\d+$/.test(k); })) {
+                    return keys.sort(function (a, b) { return Number(a) - Number(b); }).map(function (k) { return v[k]; });
+                }
+            }
+            return [];
+        }
         return {
             stationId: row.station_id,
             date: row.record_date,
             staffId: row.staff_id || '',
             meterReadings: row.meter_readings || {},
             stockEntries: row.stock_entries || {},
-            productSales: row.product_sales || [],
+            productSales: toArr(row.product_sales),
             productStockEntries: row.product_stock_entries || {},
             taxInvoices: row.tax_invoices || { abbreviated: [], full: [] },
-            expenses: row.expenses || [],
-            creditCardEntries: row.credit_card_entries || [],
-            bluecardEntries: row.bluecard_entries || [],
-            creditCustomers: row.credit_customers || [],
+            expenses: toArr(row.expenses),
+            creditCardEntries: toArr(row.credit_card_entries),
+            bluecardEntries: toArr(row.bluecard_entries),
+            creditCustomers: toArr(row.credit_customers),
             finance: row.finance || {},
             fuelPrices: row.fuel_prices || {},
-            internalUsage: row.internal_usage || [],
+            internalUsage: toArr(row.internal_usage),
             updatedAt: row.updated_at,
         };
     },
+    // Build delta object: only fields that differ from snapshot
+    // Returns db-column-name → new value mapping
+    _buildDelta(current, snapshot) {
+        const fieldMap = {
+            staffId: 'staff_id',
+            meterReadings: 'meter_readings',
+            stockEntries: 'stock_entries',
+            productSales: 'product_sales',
+            productStockEntries: 'product_stock_entries',
+            taxInvoices: 'tax_invoices',
+            expenses: 'expenses',
+            creditCardEntries: 'credit_card_entries',
+            bluecardEntries: 'bluecard_entries',
+            creditCustomers: 'credit_customers',
+            finance: 'finance',
+            fuelPrices: 'fuel_prices',
+            internalUsage: 'internal_usage',
+        };
+        const delta = {};
+        Object.keys(fieldMap).forEach(function (localKey) {
+            const dbKey = fieldMap[localKey];
+            const cur = current[localKey];
+            const snap = snapshot[localKey];
+            if (JSON.stringify(cur || null) !== JSON.stringify(snap || null)) {
+                delta[dbKey] = cur || (Array.isArray(snap) ? [] : (typeof snap === 'object' ? {} : ''));
+            }
+        });
+        return delta;
+    },
+
     _toDb(record) {
         const userId = (Auth.currentUser && Auth.currentUser.id) || null;
         const obj = {
@@ -590,13 +635,13 @@ const DB = {
 
     // --- localStorage backup ---
     _backupRecords() {
-        try { localStorage.setItem('fuelAccounting_v1', JSON.stringify(this._cache)); } catch(e) {}
+        try { localStorage.setItem('fuelAccounting_v1', JSON.stringify(this._cache)); } catch (e) { }
     },
     _backupPrices() {
-        try { localStorage.setItem('fuelPrices_v2', JSON.stringify({ prices: this._pricesCache, updatedAt: this._pricesUpdatedAt })); } catch(e) {}
+        try { localStorage.setItem('fuelPrices_v2', JSON.stringify({ prices: this._pricesCache, updatedAt: this._pricesUpdatedAt })); } catch (e) { }
     },
     _backupTax() {
-        try { localStorage.setItem('fuelAccounting_taxEntry_v1', JSON.stringify(this._taxCache)); } catch(e) {}
+        try { localStorage.setItem('fuelAccounting_taxEntry_v1', JSON.stringify(this._taxCache)); } catch (e) { }
     },
 
     // --- Init: load all from Supabase (with localStorage fallback) ---
@@ -611,11 +656,44 @@ const DB = {
             ]);
 
             if (recRes.error) throw recRes.error;
-            this._cache = {};
+            // Load Supabase data
+            var supabaseRecords = {};
             (recRes.data || []).forEach(r => {
                 const a = this._fromDb(r);
-                this._cache[`${a.stationId}_${a.date}`] = a;
+                supabaseRecords[`${a.stationId}_${a.date}`] = a;
             });
+            // Merge with localStorage to prevent data loss when Supabase returns empty
+            var localRecords = {};
+            try { localRecords = JSON.parse(localStorage.getItem('fuelAccounting_v1') || '{}'); } catch (e) {}
+            var localCount = Object.keys(localRecords).length;
+            var supabaseCount = Object.keys(supabaseRecords).length;
+            if (supabaseCount === 0 && localCount > 0) {
+                // Supabase empty but localStorage has data — keep localStorage data (likely sync issue)
+                console.warn('Supabase returned 0 records but localStorage has ' + localCount + ' — keeping localStorage data');
+                this._cache = localRecords;
+                // Try to sync localStorage records to Supabase in background
+                setTimeout(() => { this.forceSyncAll(); }, 3000);
+            } else if (supabaseCount > 0 && localCount > 0) {
+                // Both have data — merge carefully to preserve any local entries not yet synced
+                this._cache = {};
+                var allKeys = {};
+                Object.keys(localRecords).forEach(function (k) { allKeys[k] = 1; });
+                Object.keys(supabaseRecords).forEach(function (k) { allKeys[k] = 1; });
+                var self = this;
+                Object.keys(allKeys).forEach(function (k) {
+                    var lr = localRecords[k], sr = supabaseRecords[k];
+                    if (lr && sr) {
+                        // Both exist: merge using 2-way union to prevent entry loss
+                        self._cache[k] = self._mergeLocalServer(lr, sr);
+                    } else {
+                        self._cache[k] = lr || sr;
+                    }
+                });
+                // Sync any records that had local-only changes back to Supabase
+                setTimeout(function () { self.forceSyncAll(); }, 3000);
+            } else {
+                this._cache = supabaseRecords;
+            }
 
             if (priceRes.error) throw priceRes.error;
             this._pricesCache = {};
@@ -628,10 +706,17 @@ const DB = {
             }
 
             if (taxRes.error) throw taxRes.error;
-            this._taxCache = {};
+            var supabaseTax = {};
             (taxRes.data || []).forEach(t => {
-                this._taxCache[`${t.station_id}_${t.record_date}`] = t.data;
+                supabaseTax[`${t.station_id}_${t.record_date}`] = t.data;
             });
+            var localTax = {};
+            try { localTax = JSON.parse(localStorage.getItem('fuelAccounting_taxEntry_v1') || '{}'); } catch (e) {}
+            if (Object.keys(supabaseTax).length === 0 && Object.keys(localTax).length > 0) {
+                this._taxCache = localTax;
+            } else {
+                this._taxCache = Object.assign({}, localTax, supabaseTax);
+            }
 
             // Credit payments
             if (cpRes && cpRes.data) {
@@ -649,7 +734,24 @@ const DB = {
             this._backupCreditSettings();
         } catch (e) {
             console.warn('Supabase load failed, using localStorage:', e);
-            try { this._cache = JSON.parse(localStorage.getItem('fuelAccounting_v1') || '{}'); } catch { this._cache = {}; }
+            try {
+                this._cache = JSON.parse(localStorage.getItem('fuelAccounting_v1') || '{}');
+                // Repair corrupted arrays in localStorage cache
+                var self = this;
+                Object.keys(this._cache).forEach(function (k) {
+                    var rec = self._cache[k]; if (!rec) return;
+                    ['productSales', 'expenses', 'creditCardEntries', 'bluecardEntries', 'creditCustomers', 'internalUsage'].forEach(function (f) {
+                        var v = rec[f];
+                        if (v && !Array.isArray(v) && typeof v === 'object') {
+                            var ks = Object.keys(v);
+                            if (ks.length === 0) rec[f] = [];
+                            else if (ks.every(function (x) { return /^\d+$/.test(x); })) {
+                                rec[f] = ks.sort(function (a, b) { return Number(a) - Number(b); }).map(function (x) { return v[x]; });
+                            } else rec[f] = [];
+                        }
+                    });
+                });
+            } catch { this._cache = {}; }
             try {
                 const pd = JSON.parse(localStorage.getItem('fuelPrices_v2') || '{}');
                 this._pricesCache = pd.prices || {};
@@ -673,24 +775,174 @@ const DB = {
         this._syncRecord(record);
     },
     // 3-way merge: compare local changes vs original, merge with server
+    // 2-way union merge (no snapshot): never loses entries from either side
+    _mergeLocalServer(local, server) {
+        if (!local) return server;
+        if (!server) return local;
+        var objectFields = ['meterReadings', 'stockEntries', 'productStockEntries', 'fuelPrices'];
+        var arrayFields = ['taxInvoices', 'expenses', 'productSales', 'creditCustomers',
+            'creditCardEntries', 'bluecardEntries', 'internalUsage'];
+        var out = JSON.parse(JSON.stringify(server));
+        // Object fields: union by key; local wins on conflict (local is more recent edits)
+        objectFields.forEach(function (f) {
+            var L = local[f] || {}, S = server[f] || {};
+            var merged = {};
+            Object.keys(S).forEach(function (k) { merged[k] = S[k]; });
+            Object.keys(L).forEach(function (k) { merged[k] = L[k]; });
+            out[f] = merged;
+        });
+        // Array fields: union by id — NEVER drop items.
+        // FIX #2: LOCAL-WINS for id conflicts. localStorage = user's latest edit
+        // that may not be synced yet; server = possibly older row. If we let
+        // server win we silently revert unsynced edits on page reload.
+        arrayFields.forEach(function (f) {
+            var L = Array.isArray(local[f]) ? local[f] : [];
+            var S = Array.isArray(server[f]) ? server[f] : [];
+            if (f === 'taxInvoices') {
+                // Flat object (not array)
+                out[f] = local[f] || server[f] || { abbreviated: [], full: [] };
+                return;
+            }
+            var seen = {};
+            var union = [];
+            function keyFor(it, i) { return (it && (it.id || it.uid || it._id)) || JSON.stringify(it); }
+            // Local FIRST so its version of any shared id wins
+            L.forEach(function (it, i) { var k = keyFor(it, i); if (!seen[k]) { seen[k] = 1; union.push(it); } });
+            S.forEach(function (it, i) { var k = keyFor(it, i); if (!seen[k]) { seen[k] = 1; union.push(it); } });
+            out[f] = union;
+        });
+        // Finance: local wins field-by-field (more recent edits), preserve server fields if local missing
+        var finL = local.finance || {}, finS = server.finance || {};
+        var finOut = {};
+        Object.keys(finS).forEach(function (k) { finOut[k] = finS[k]; });
+        Object.keys(finL).forEach(function (k) { if (finL[k] !== undefined && finL[k] !== '' && finL[k] !== null) finOut[k] = finL[k]; });
+        out.finance = finOut;
+        return out;
+    },
     _mergeRecord(local, serverRow, original) {
         if (!serverRow || !original) return local; // no server data, just use local
         var server = this._fromDb(serverRow);
-        var mergeFields = ['meterReadings','stockEntries','productSales','productStockEntries',
-            'taxInvoices','expenses','creditCardEntries','bluecardEntries',
-            'creditCustomers','finance','fuelPrices','internalUsage'];
+        // Object-type sections: merge key-by-key (keys = nozzleId/productId/tankId/etc.)
+        var objectFields = ['meterReadings', 'stockEntries', 'productStockEntries', 'fuelPrices'];
+        // Array-type sections: union by unique id (or concatenate if no id)
+        var arrayFields = ['expenses', 'productSales', 'creditCustomers',
+            'creditCardEntries', 'bluecardEntries', 'internalUsage'];
+        // Whole-object sections: last-write-wins per top-level key
+        var flatFields = ['finance', 'taxInvoices'];
         var merged = JSON.parse(JSON.stringify(local));
-        mergeFields.forEach(function(field) {
-            var localVal = JSON.stringify(local[field] || null);
-            var origVal = JSON.stringify(original[field] || null);
-            var serverVal = JSON.stringify(server[field] || null);
-            if (localVal === origVal && serverVal !== origVal) {
-                // Local didn't change but server did → use server
-                merged[field] = JSON.parse(serverVal);
-            }
-            // If local changed → keep local (already in merged)
-            // If both changed → keep local (last edit wins for that section)
+
+        function jeq(a, b) { return JSON.stringify(a || null) === JSON.stringify(b || null); }
+
+        objectFields.forEach(function (field) {
+            var L = local[field] || {};
+            var O = original[field] || {};
+            var S = server[field] || {};
+            var out = {};
+            // Union of all keys
+            var keys = {};
+            Object.keys(L).forEach(function (k) { keys[k] = 1; });
+            Object.keys(S).forEach(function (k) { keys[k] = 1; });
+            Object.keys(keys).forEach(function (k) {
+                var lv = L[k], ov = O[k], sv = S[k];
+                var localChanged = !jeq(lv, ov);
+                var serverChanged = !jeq(sv, ov);
+                if (localChanged && !serverChanged) out[k] = lv;
+                else if (!localChanged && serverChanged) { if (sv !== undefined) out[k] = sv; }
+                else if (localChanged && serverChanged) {
+                    // Both changed same key → merge field-level if both are objects
+                    if (lv && sv && typeof lv === 'object' && typeof sv === 'object' && !Array.isArray(lv)) {
+                        var sub = {};
+                        var sk = {};
+                        Object.keys(lv).forEach(function (x) { sk[x] = 1; });
+                        Object.keys(sv).forEach(function (x) { sk[x] = 1; });
+                        Object.keys(sk).forEach(function (x) {
+                            var lx = lv[x], ox = (ov || {})[x], sx = sv[x];
+                            var lc = !jeq(lx, ox), sc = !jeq(sx, ox);
+                            if (lc && !sc) sub[x] = lx;
+                            else if (!lc && sc) sub[x] = sx;
+                            else if (lc && sc) sub[x] = lx; // both changed → local wins
+                            else sub[x] = lx;
+                        });
+                        out[k] = sub;
+                    } else {
+                        out[k] = lv; // local wins on conflict
+                    }
+                } else {
+                    // Neither changed
+                    if (lv !== undefined) out[k] = lv;
+                    else if (sv !== undefined) out[k] = sv;
+                }
+            });
+            merged[field] = out;
         });
+
+        arrayFields.forEach(function (field) {
+            var L = Array.isArray(local[field]) ? local[field] : [];
+            var O = Array.isArray(original[field]) ? original[field] : [];
+            var S = Array.isArray(server[field]) ? server[field] : [];
+            // Separate items with real IDs vs id-less items
+            function realId(it) { return it && (it.id || it.uid || it._id); }
+            var idL = [], idO = [], idS = [];
+            var noIdL = [], noIdO = [], noIdS = [];
+            L.forEach(function (it) { if (realId(it)) idL.push(it); else noIdL.push(it); });
+            O.forEach(function (it) { if (realId(it)) idO.push(it); else noIdO.push(it); });
+            S.forEach(function (it) { if (realId(it)) idS.push(it); else noIdS.push(it); });
+
+            // Process id-based items with 3-way merge
+            var origMap = {}; idO.forEach(function (it) { origMap[realId(it)] = it; });
+            var localMap = {}; idL.forEach(function (it) { localMap[realId(it)] = it; });
+            var serverMap = {}; idS.forEach(function (it) { serverMap[realId(it)] = it; });
+            var keys = {};
+            Object.keys(localMap).forEach(function (k) { keys[k] = 1; });
+            Object.keys(serverMap).forEach(function (k) { keys[k] = 1; });
+            var idOut = [];
+            Object.keys(keys).forEach(function (k) {
+                var lv = localMap[k], ov = origMap[k], sv = serverMap[k];
+                var localChanged = !jeq(lv, ov);
+                var serverChanged = !jeq(sv, ov);
+                if (localChanged && !serverChanged) { if (lv !== undefined) idOut.push(lv); }
+                else if (!localChanged && serverChanged) { if (sv !== undefined) idOut.push(sv); }
+                else if (localChanged && serverChanged) { if (lv !== undefined) idOut.push(lv); }
+                else { if (lv !== undefined) idOut.push(lv); else if (sv !== undefined) idOut.push(sv); }
+            });
+
+            // Id-less items: UNION by content to prevent loss (deduplicate exact duplicates)
+            var noIdOut = [];
+            var seenContent = {};
+            function contentKey(it) { try { return JSON.stringify(it); } catch (e) { return Math.random().toString(); } }
+            // Keep all items that existed in original (to preserve deletions check)
+            var origContentSet = {};
+            noIdO.forEach(function (it) { origContentSet[contentKey(it)] = 1; });
+            // Add all local items (local edits/additions win)
+            noIdL.forEach(function (it) {
+                var k = contentKey(it);
+                if (!seenContent[k]) { seenContent[k] = 1; noIdOut.push(it); }
+            });
+            // Add server items that are NEW (not in original) → concurrent additions from other users
+            noIdS.forEach(function (it) {
+                var k = contentKey(it);
+                if (seenContent[k]) return; // already have
+                if (!origContentSet[k]) {
+                    // NEW item on server since we loaded → keep it (don't overwrite concurrent add)
+                    seenContent[k] = 1; noIdOut.push(it);
+                }
+                // else: item was in original but not in local → intentional deletion, skip
+            });
+
+            merged[field] = idOut.concat(noIdOut);
+        });
+
+        flatFields.forEach(function (field) {
+            var L = local[field] || {};
+            var O = original[field] || {};
+            var S = server[field] || {};
+            var out = JSON.parse(JSON.stringify(L));
+            Object.keys(S).forEach(function (k) {
+                if (jeq(L[k], O[k]) && !jeq(S[k], O[k])) out[k] = S[k];
+            });
+            merged[field] = out;
+        });
+
         return merged;
     },
     async _syncRecord(record) {
@@ -707,8 +959,8 @@ const DB = {
                 }
             }
 
-            // Fetch latest server version for merge
-            var mergedRecord = record;
+            // Fetch FULL server row for 3-way merge (not just existence check)
+            var serverRow = null;
             try {
                 var { data: serverRows } = await supabaseClient
                     .from('daily_records')
@@ -716,25 +968,133 @@ const DB = {
                     .eq('station_id', record.stationId)
                     .eq('record_date', record.date)
                     .limit(1);
-                if (serverRows && serverRows.length > 0 && window._originalSnapshot) {
-                    mergedRecord = this._mergeRecord(record, serverRows[0], window._originalSnapshot);
-                    // Update local cache with merged data
-                    var key = record.stationId + '_' + record.date;
-                    this._cache[key] = mergedRecord;
+                if (serverRows && serverRows.length > 0) serverRow = serverRows[0];
+            } catch (e) { console.warn('Server fetch failed:', e); }
+            var existsOnServer = !!serverRow;
+
+            let error;
+            const userId = (Auth.currentUser && Auth.currentUser.id) || null;
+
+            // Snapshot is only valid if it was taken for THIS record (stationId + date).
+            // Cascade / background saves for other records must not use another record's snapshot.
+            const snapId = window._snapshotFor || {};
+            const snapshotMatches = !!window._originalSnapshot
+                && snapId.stationId === record.stationId
+                && snapId.date === record.date;
+
+            if (existsOnServer && snapshotMatches) {
+                // 3-way merge server + local against snapshot to preserve concurrent edits
+                let mergedRecord = record;
+                try {
+                    mergedRecord = this._mergeRecord(record, serverRow, window._originalSnapshot);
+                    // Update local cache with merged result so UI reflects concurrent changes
+                    this._cache[record.stationId + '_' + record.date] = mergedRecord;
                     this._backupRecords();
+                } catch (mergeErr) {
+                    console.warn('Merge failed, falling back to local:', mergeErr);
+                    mergedRecord = record;
                 }
-            } catch (mergeErr) {
-                console.warn('Merge fetch failed, saving local version:', mergeErr);
+
+                // DELTA UPDATE: only send fields that changed since snapshot (merged vs snapshot)
+                const delta = this._buildDelta(mergedRecord, window._originalSnapshot);
+                if (Object.keys(delta).length === 0) {
+                    // Nothing changed — nothing to sync
+                    return;
+                }
+                delta.updated_at = new Date().toISOString();
+                delta.updated_by = userId;
+                console.log('[Delta Sync] Updating fields:', Object.keys(delta));
+                const { error: updErr } = await supabaseClient
+                    .from('daily_records')
+                    .update(delta)
+                    .eq('station_id', record.stationId)
+                    .eq('record_date', record.date);
+                error = updErr;
+                // Store merged record for snapshot update on success
+                if (!error) window._lastSyncedRecord = mergedRecord;
+            } else {
+                // Full upsert path: new record, OR snapshot is for a different record
+                // (cascade / background saves). To avoid wiping concurrent edits when a
+                // server row already exists, field-level merge server→record with server-wins
+                // for any field not already populated locally.
+                let recordToUpsert = record;
+                if (existsOnServer && serverRow) {
+                    try {
+                        const serverRec = this._fromDb(serverRow);
+                        const objectFields = ['meterReadings', 'stockEntries', 'productStockEntries', 'fuelPrices'];
+                        const arrayFields = ['productSales', 'expenses', 'creditCardEntries',
+                            'bluecardEntries', 'creditCustomers', 'internalUsage'];
+                        const merged = JSON.parse(JSON.stringify(record));
+                        // Object fields: union keys, keep server's keys that local doesn't have
+                        objectFields.forEach(function (f) {
+                            const L = merged[f] || {}, S = serverRec[f] || {};
+                            const out = {};
+                            Object.keys(S).forEach(function (k) { out[k] = S[k]; });
+                            Object.keys(L).forEach(function (k) {
+                                // Keep local if it has real values; otherwise prefer server
+                                const lv = L[k];
+                                if (lv && typeof lv === 'object') {
+                                    const hasVals = Object.keys(lv).some(function (x) {
+                                        const v = lv[x];
+                                        return v !== '' && v !== null && v !== undefined;
+                                    });
+                                    out[k] = hasVals ? lv : (out[k] || lv);
+                                } else {
+                                    out[k] = lv;
+                                }
+                            });
+                            merged[f] = out;
+                        });
+                        // Array fields: union by id; never drop
+                        arrayFields.forEach(function (f) {
+                            const L = Array.isArray(merged[f]) ? merged[f] : [];
+                            const S = Array.isArray(serverRec[f]) ? serverRec[f] : [];
+                            const seen = {};
+                            function keyFor(it, i) { return (it && (it.id || it.uid || it._id)) || JSON.stringify(it); }
+                            const union = [];
+                            L.forEach(function (it, i) { const k = keyFor(it, i); if (!seen[k]) { seen[k] = 1; union.push(it); } });
+                            S.forEach(function (it, i) { const k = keyFor(it, i); if (!seen[k]) { seen[k] = 1; union.push(it); } });
+                            merged[f] = union;
+                        });
+                        // finance: field-level union, local wins when present
+                        const finL = merged.finance || {}, finS = serverRec.finance || {};
+                        const finOut = {};
+                        Object.keys(finS).forEach(function (k) { finOut[k] = finS[k]; });
+                        Object.keys(finL).forEach(function (k) {
+                            if (finL[k] !== undefined && finL[k] !== '' && finL[k] !== null) finOut[k] = finL[k];
+                        });
+                        merged.finance = finOut;
+                        // tax_invoices: union abbreviated/full arrays
+                        const tL = merged.taxInvoices || { abbreviated: [], full: [] };
+                        const tS = serverRec.taxInvoices || { abbreviated: [], full: [] };
+                        merged.taxInvoices = {
+                            abbreviated: (Array.isArray(tL.abbreviated) && tL.abbreviated.length)
+                                ? tL.abbreviated : (tS.abbreviated || []),
+                            full: (Array.isArray(tL.full) && tL.full.length)
+                                ? tL.full : (tS.full || []),
+                        };
+                        recordToUpsert = merged;
+                        // Reflect merge in local cache for consistency
+                        this._cache[record.stationId + '_' + record.date] = merged;
+                        this._backupRecords();
+                    } catch (mergeErr) {
+                        console.warn('Upsert-merge failed, using raw record:', mergeErr);
+                        recordToUpsert = record;
+                    }
+                }
+                const dbData = this._toDb(recordToUpsert);
+                const { error: upsErr } = await supabaseClient
+                    .from('daily_records')
+                    .upsert(dbData, { onConflict: 'station_id,record_date' });
+                error = upsErr;
+                if (!error) window._lastSyncedRecord = recordToUpsert;
             }
 
-            const dbData = this._toDb(mergedRecord);
-            let { error } = await supabaseClient
-                .from('daily_records')
-                .upsert(dbData, { onConflict: 'station_id,record_date' });
             // Retry once on RLS error after refreshing session
             if (error && error.message && error.message.includes('row-level security')) {
                 const { data: retryRefresh } = await supabaseClient.auth.refreshSession();
                 if (retryRefresh.session) {
+                    const dbData = this._toDb(record);
                     const retry = await supabaseClient
                         .from('daily_records')
                         .upsert(dbData, { onConflict: 'station_id,record_date' });
@@ -743,13 +1103,46 @@ const DB = {
             }
             if (error) { console.error('Sync failed:', error); showToast('Sync: ' + error.message, 'error'); }
             else {
-                // Update snapshot after successful save
-                window._originalSnapshot = JSON.parse(JSON.stringify(mergedRecord));
+                // Only overwrite the user-visible snapshot if this sync was for the record the user is editing.
+                // Background/cascade saves for OTHER records must not touch the snapshot.
+                if (snapshotMatches || (snapId.stationId === record.stationId && snapId.date === record.date)) {
+                    const snapshotSrc = window._lastSyncedRecord || record;
+                    window._originalSnapshot = JSON.parse(JSON.stringify(snapshotSrc));
+                    window._snapshotFor = { stationId: record.stationId, date: record.date };
+                }
+                window._lastSyncedRecord = null;
             }
         } catch (e) { console.error('Sync error:', e); }
     },
     getAllRecords() {
         return Object.values(this._cache).sort((a, b) => b.date.localeCompare(a.date));
+    },
+    // Diagnostic: force sync all localStorage records to Supabase
+    async forceSyncAll() {
+        const records = Object.values(this._cache);
+        if (records.length === 0) { showToast('ไม่มีข้อมูลใน cache', 'error'); return; }
+        let ok = 0, fail = 0, errors = [];
+        showToast('กำลัง sync ' + records.length + ' records...', 'info');
+        for (const rec of records) {
+            try {
+                const dbData = this._toDb(rec);
+                const { error } = await supabaseClient.from('daily_records')
+                    .upsert(dbData, { onConflict: 'station_id,record_date' });
+                if (error) {
+                    fail++;
+                    errors.push({ stationId: rec.stationId, date: rec.date, message: error.message, code: error.code, details: error.details, hint: error.hint });
+                } else ok++;
+            } catch (e) {
+                fail++;
+                errors.push({ stationId: rec.stationId, date: rec.date, message: e.message });
+            }
+        }
+        if (fail > 0) {
+            console.error('Sync errors:', errors);
+            showSyncErrorsModal(ok, fail, errors);
+        } else {
+            showToast('Sync สำเร็จทั้งหมด ' + ok + ' records!', 'success');
+        }
     },
     deleteRecord(stationId, date) {
         delete this._cache[`${stationId}_${date}`];
@@ -799,7 +1192,7 @@ const DB = {
     // --- Credit Payments (การรับชำระหนี้) ---
     _creditPaymentsCache: [],
     _backupCreditPayments() {
-        try { localStorage.setItem('fuelAccounting_creditPayments_v1', JSON.stringify(this._creditPaymentsCache)); } catch(e) {}
+        try { localStorage.setItem('fuelAccounting_creditPayments_v1', JSON.stringify(this._creditPaymentsCache)); } catch (e) { }
     },
     getCreditPayments() { return this._creditPaymentsCache; },
     getCreditPaymentsByCustomer(customerName) {
@@ -834,7 +1227,7 @@ const DB = {
     // --- Credit Settings (วงเงินเครดิต / เงื่อนไข) ---
     _creditSettingsCache: { overdueDays: 30, defaultCreditLimit: 50000, customerLimits: {} },
     _backupCreditSettings() {
-        try { localStorage.setItem('fuelAccounting_creditSettings_v1', JSON.stringify(this._creditSettingsCache)); } catch(e) {}
+        try { localStorage.setItem('fuelAccounting_creditSettings_v1', JSON.stringify(this._creditSettingsCache)); } catch (e) { }
     },
     getCreditSettings() { return this._creditSettingsCache; },
     saveCreditSettings(settings) {
@@ -869,7 +1262,7 @@ let dashboardState = {
 };
 let chartInstances = {};
 
-const CHART_COLORS = ['#4f46e5','#06b6d4','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#6366f1','#14b8a6','#f97316','#84cc16','#a855f7','#64748b'];
+const CHART_COLORS = ['#4f46e5', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#14b8a6', '#f97316', '#84cc16', '#a855f7', '#64748b'];
 
 // ===== DASHBOARD DATA HELPERS =====
 function getFilteredRecords() {
@@ -930,7 +1323,7 @@ function aggregateExpenseCategories(records) {
 }
 
 function destroyAllCharts() {
-    Object.values(chartInstances).forEach(c => { try { c.destroy(); } catch(e){} });
+    Object.values(chartInstances).forEach(c => { try { c.destroy(); } catch (e) { } });
     chartInstances = {};
 }
 
@@ -1050,8 +1443,8 @@ function aggregateCompareData(stationId) {
 function renderComparePage(el) {
     compareCharts.forEach(c => c.destroy()); compareCharts = [];
     const cs = compareState;
-    const periodBtns = ['day','month','year','range'].map(p =>
-        `<button class="period-tab ${cs.period === p ? 'active' : ''}" onclick="compareState.period='${p}';renderComparePage(document.getElementById('pageContent'))">${{day:'วัน',month:'เดือน',year:'ปี',range:'ช่วงวันที่'}[p]}</button>`
+    const periodBtns = ['day', 'month', 'year', 'range'].map(p =>
+        `<button class="period-tab ${cs.period === p ? 'active' : ''}" onclick="compareState.period='${p}';renderComparePage(document.getElementById('pageContent'))">${{ day: 'วัน', month: 'เดือน', year: 'ปี', range: 'ช่วงวันที่' }[p]}</button>`
     ).join('');
 
     const yearOpts = [];
@@ -1292,14 +1685,16 @@ function renderCompareContent() {
     if (ctxRev) {
         compareCharts.push(new Chart(ctxRev, {
             type: 'bar',
-            data: { labels, datasets: [
-                { label: 'รายได้รวม', data: selected.map(sid => stationData[sid].gross), backgroundColor: '#4f46e5' },
-                { label: 'เงินเชื่อ', data: selected.map(sid => stationData[sid].creditSales), backgroundColor: '#ef4444' },
-                { label: 'เครดิตการ์ด', data: selected.map(sid => stationData[sid].creditCard), backgroundColor: '#3b82f6' },
-                { label: 'Bluecard', data: selected.map(sid => stationData[sid].bluecard), backgroundColor: '#0ea5e9' },
-                { label: 'เงินโอน / QR', data: selected.map(sid => stationData[sid].qrTransfer), backgroundColor: '#10b981' },
-                { label: 'ค่าใช้จ่าย', data: selected.map(sid => stationData[sid].expenses), backgroundColor: '#f59e0b' },
-            ]},
+            data: {
+                labels, datasets: [
+                    { label: 'รายได้รวม', data: selected.map(sid => stationData[sid].gross), backgroundColor: '#4f46e5' },
+                    { label: 'เงินเชื่อ', data: selected.map(sid => stationData[sid].creditSales), backgroundColor: '#ef4444' },
+                    { label: 'เครดิตการ์ด', data: selected.map(sid => stationData[sid].creditCard), backgroundColor: '#3b82f6' },
+                    { label: 'Bluecard', data: selected.map(sid => stationData[sid].bluecard), backgroundColor: '#0ea5e9' },
+                    { label: 'เงินโอน / QR', data: selected.map(sid => stationData[sid].qrTransfer), backgroundColor: '#10b981' },
+                    { label: 'ค่าใช้จ่าย', data: selected.map(sid => stationData[sid].expenses), backgroundColor: '#f59e0b' },
+                ]
+            },
             options: {
                 responsive: true, maintainAspectRatio: false,
                 plugins: { legend: { position: 'top' }, tooltip: { callbacks: { label: c => c.dataset.label + ': ' + fmt(c.parsed.y) + ' บาท' } } },
@@ -1428,6 +1823,85 @@ function showToast(msg, type = 'success') {
     t.textContent = msg;
     document.body.appendChild(t);
     setTimeout(() => t.remove(), 3000);
+}
+
+// Show a modal listing all sync errors (with stationId, date, and reason).
+// Used instead of "please open Console" so users can see failures inline.
+function showSyncErrorsModal(ok, fail, errors) {
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+    function humanReason(msg) {
+        const m = String(msg || '');
+        if (/row-level security/i.test(m)) return 'ไม่ได้ login หรือ session หมดอายุ — ลอง logout แล้ว login ใหม่';
+        if (/JWT|expired/i.test(m)) return 'Token หมดอายุ — refresh หน้าเว็บ';
+        if (/duplicate key/i.test(m)) return 'มี record ซ้ำในฐานข้อมูล (station+date ชนกัน)';
+        if (/not-null constraint/i.test(m)) return 'มี field ที่บังคับค่าแต่เว้นว่างอยู่';
+        if (/does not exist/i.test(m)) return 'Schema ไม่ตรง — column ที่ใช้ยังไม่ถูกสร้างใน Supabase';
+        if (/invalid input syntax/i.test(m)) return 'ข้อมูลผิด type (เช่นใส่ข้อความในช่องตัวเลข)';
+        if (/Failed to fetch|NetworkError/i.test(m)) return 'เครือข่ายติดขัด / Tracking Prevention บล็อก Supabase';
+        return '';
+    }
+    const sNames = (typeof REF !== 'undefined' && REF.stations)
+        ? Object.fromEntries(REF.stations.map(s => [s.id, s.name])) : {};
+
+    const rows = errors.map((e, i) => {
+        const station = sNames[e.stationId] || e.stationId;
+        const human = humanReason(e.message);
+        return `<tr>
+            <td style="padding:6px;border-bottom:1px solid #eee;">${i + 1}</td>
+            <td style="padding:6px;border-bottom:1px solid #eee;">${esc(station)}<br><small style="color:#888">${esc(e.stationId)}</small></td>
+            <td style="padding:6px;border-bottom:1px solid #eee;white-space:nowrap;">${esc(e.date)}</td>
+            <td style="padding:6px;border-bottom:1px solid #eee;">
+                <div style="color:#b91c1c;font-weight:600;">${esc(e.message)}</div>
+                ${e.code ? `<div style="color:#666;font-size:11px;">code: ${esc(e.code)}</div>` : ''}
+                ${e.details ? `<div style="color:#666;font-size:11px;">details: ${esc(e.details)}</div>` : ''}
+                ${e.hint ? `<div style="color:#666;font-size:11px;">hint: ${esc(e.hint)}</div>` : ''}
+                ${human ? `<div style="margin-top:4px;padding:4px 8px;background:#fef3c7;border-left:3px solid #f59e0b;border-radius:4px;font-size:12px;">💡 ${esc(human)}</div>` : ''}
+            </td>
+        </tr>`;
+    }).join('');
+
+    const textSummary = errors.map(e => `${e.stationId}_${e.date}: ${e.message}`).join('\n');
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.onclick = (ev) => { if (ev.target === overlay) overlay.remove(); };
+    overlay.innerHTML = `
+        <div class="modal" style="max-width:800px;width:94vw;max-height:86vh;display:flex;flex-direction:column;padding:0;" onclick="event.stopPropagation()">
+            <div style="padding:16px 20px;border-bottom:1px solid #e5e7eb;background:#fef2f2;border-radius:8px 8px 0 0;">
+                <h3 style="margin:0 0 6px 0;color:#b91c1c;">⚠️ Sync ไม่สำเร็จบางรายการ</h3>
+                <div style="color:#555;font-size:14px;">
+                    สำเร็จ <strong style="color:#059669;">${ok}</strong> รายการ ·
+                    ล้มเหลว <strong style="color:#dc2626;">${fail}</strong> รายการ
+                </div>
+            </div>
+            <div style="overflow:auto;flex:1;padding:0 12px;">
+                <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                    <thead style="position:sticky;top:0;background:#f9fafb;">
+                        <tr>
+                            <th style="padding:8px;text-align:left;border-bottom:2px solid #e5e7eb;">#</th>
+                            <th style="padding:8px;text-align:left;border-bottom:2px solid #e5e7eb;">ปั้ม</th>
+                            <th style="padding:8px;text-align:left;border-bottom:2px solid #e5e7eb;">วันที่</th>
+                            <th style="padding:8px;text-align:left;border-bottom:2px solid #e5e7eb;">สาเหตุ</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+            <div style="padding:12px 20px;border-top:1px solid #e5e7eb;display:flex;gap:8px;justify-content:flex-end;">
+                <button class="btn btn-outline" id="syncErrCopy">📋 คัดลอกทั้งหมด</button>
+                <button class="btn btn-primary" onclick="this.closest('.modal-overlay').remove()">ปิด</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    const copyBtn = overlay.querySelector('#syncErrCopy');
+    if (copyBtn) {
+        copyBtn.onclick = () => {
+            navigator.clipboard.writeText(textSummary).then(
+                () => { copyBtn.textContent = '✓ คัดลอกแล้ว'; setTimeout(() => { copyBtn.textContent = '📋 คัดลอกทั้งหมด'; }, 1500); },
+                () => showToast('คัดลอกไม่สำเร็จ', 'error')
+            );
+        };
+    }
 }
 
 // ===== DASHBOARD =====
@@ -1703,15 +2177,15 @@ function renderDashboardContent() {
                     </tr></thead>
                     <tbody>
                         ${pageRecords.map(r => {
-                            const f = r.finance || {};
-                            const v = (f.actualCashSent || 0) - (f.expectedCash || 0);
-                            return `<tr class="table-row-clickable" onclick="showRecordSummaryPopup('${r.stationId}','${r.date}')">
+        const f = r.finance || {};
+        const v = (f.actualCashSent || 0) - (f.expectedCash || 0);
+        return `<tr class="table-row-clickable" onclick="showRecordSummaryPopup('${r.stationId}','${r.date}')">
                                 <td>${formatDateThai(r.date)}</td><td>${getStationName(r.stationId)}</td>
                                 <td class="number">${fmt(f.fuelSalesValue)}</td><td class="number">${fmt(f.lubricantSales)}</td>
                                 <td class="number">${fmt(f.expectedCash)}</td><td class="number">${fmt(f.actualCashSent)}</td>
                                 <td class="number ${v >= 0 ? 'variance-positive' : 'variance-negative'}">${fmt(v)}</td>
                             </tr>`;
-                        }).join('') || '<tr><td colspan="7" class="empty-state">ยังไม่มีรายการ</td></tr>'}
+    }).join('') || '<tr><td colspan="7" class="empty-state">ยังไม่มีรายการ</td></tr>'}
                     </tbody>
                 </table>
             </div>
@@ -1924,9 +2398,9 @@ function showRecordSummaryPopup(stationId, date) {
 
     // Fuel sales by type
     const fuelSalesByType = {};
-    tanks.forEach(function(tank) {
+    tanks.forEach(function (tank) {
         const meters = REF.meters.filter(m => m.tankKey === tank.key);
-        const liters = meters.reduce(function(sum, m) {
+        const liters = meters.reduce(function (sum, m) {
             const r = (record.meterReadings || {})[m.id] || {};
             return sum + Math.max(0, parseNum(r.end) - parseNum(r.start));
         }, 0);
@@ -1934,23 +2408,23 @@ function showRecordSummaryPopup(stationId, date) {
         fuelSalesByType[tank.fuelType].liters += liters;
     });
     var fuelSalesValue = 0;
-    Object.keys(fuelSalesByType).forEach(function(ft) {
+    Object.keys(fuelSalesByType).forEach(function (ft) {
         fuelSalesByType[ft].total = fuelSalesByType[ft].liters * fuelSalesByType[ft].price;
         fuelSalesValue += fuelSalesByType[ft].total;
     });
 
     // Product sales
-    var lubricantSales = (record.productSales || []).reduce(function(sum, item) {
-        var p = REF.products.find(function(pr) { return pr.id === item.productId; });
+    var lubricantSales = (record.productSales || []).reduce(function (sum, item) {
+        var p = REF.products.find(function (pr) { return pr.id === item.productId; });
         return sum + (parseNum(item.quantity) * (p ? p.price : 0));
     }, 0);
 
     // Expenses
-    var siteExpenses = (record.expenses || []).reduce(function(sum, e) { return sum + parseNum(e.amount); }, 0);
+    var siteExpenses = (record.expenses || []).reduce(function (sum, e) { return sum + parseNum(e.amount); }, 0);
 
     // Internal usage
-    var internalUsageTotal = (record.internalUsage || []).reduce(function(sum, item) {
-        var tank = tanks.find(function(t) { return t.key === item.tankKey; });
+    var internalUsageTotal = (record.internalUsage || []).reduce(function (sum, item) {
+        var tank = tanks.find(function (t) { return t.key === item.tankKey; });
         var ft = tank ? tank.fuelType : '';
         var price = ft ? parseNum(fuelPrices[ft]) : 0;
         return sum + (parseNum(item.liters) * price);
@@ -1960,7 +2434,7 @@ function showRecordSummaryPopup(stationId, date) {
     var fin = record.finance || {};
     var otherIncome = parseNum(fin.otherIncome);
     var totalGross = fuelSalesValue + lubricantSales + otherIncome;
-    var creditSales = (record.creditCustomers || []).filter(function(c) { return (c.creditType || 'meter') === 'meter'; }).reduce(function(s, c) { return s + parseNum(c.amount); }, 0);
+    var creditSales = (record.creditCustomers || []).filter(function (c) { return (c.creditType || 'meter') === 'meter'; }).reduce(function (s, c) { return s + parseNum(c.amount); }, 0);
     var creditCard = parseNum(fin.creditCardAmt);
     var bluecard = parseNum(fin.bluecardAmt);
     var qrTransfer = parseNum(fin.qrTransferAmt);
@@ -1975,7 +2449,7 @@ function showRecordSummaryPopup(stationId, date) {
     // Fuel received
     var fuelReceivedHtml = '';
     var totalReceived = 0;
-    tanks.forEach(function(tank) {
+    tanks.forEach(function (tank) {
         var se = (record.stockEntries || {})[tank.key];
         if (se && parseNum(se.fuelAdded) > 0) {
             var added = parseNum(se.fuelAdded);
@@ -1988,7 +2462,7 @@ function showRecordSummaryPopup(stationId, date) {
 
     // Credit customers
     var creditCustHtml = '';
-    (record.creditCustomers || []).forEach(function(c) {
+    (record.creditCustomers || []).forEach(function (c) {
         creditCustHtml += '<tr><td>' + (c.name || '-') + '</td>'
             + '<td>' + getCreditItemLabel(c.fuelType) + '</td>'
             + '<td class="number">' + fmt(c.liters) + '</td>'
@@ -1998,21 +2472,21 @@ function showRecordSummaryPopup(stationId, date) {
 
     // Expenses detail
     var expenseHtml = '';
-    (record.expenses || []).forEach(function(e) {
+    (record.expenses || []).forEach(function (e) {
         expenseHtml += '<tr><td>' + (e.category || '-') + '</td><td>' + (e.description || '-') + '</td><td class="number">' + fmt(e.amount) + '</td></tr>';
     });
 
     // Internal usage detail
     var internalHtml = '';
-    (record.internalUsage || []).forEach(function(item) {
-        var tank = tanks.find(function(t) { return t.key === item.tankKey; });
+    (record.internalUsage || []).forEach(function (item) {
+        var tank = tanks.find(function (t) { return t.key === item.tankKey; });
         var ftLabel = tank ? (REF.fuelTypeLabels[tank.fuelType] || tank.fuelType) : '-';
         internalHtml += '<tr><td>' + ftLabel + '</td><td class="number">' + fmt(item.liters) + '</td><td>' + (item.description || '-') + '</td></tr>';
     });
 
     // Build fuel sales rows
     var fuelRows = '';
-    Object.keys(fuelSalesByType).forEach(function(ft) {
+    Object.keys(fuelSalesByType).forEach(function (ft) {
         var d = fuelSalesByType[ft];
         var label = REF.fuelTypeLabels[ft] || ft;
         fuelRows += '<tr><td>' + label + '</td><td class="number">' + fmt(d.liters) + '</td>'
@@ -2100,21 +2574,21 @@ function showRecordSummaryPopup(stationId, date) {
 
         // Detail sections (collapsible)
         + (fuelReceivedHtml ? '<div class="card" style="margin-bottom:12px"><div class="card-header" style="cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\'"><h3>▶ รับน้ำมันเข้า (' + fmt(totalReceived) + ' ลิตร)</h3></div>'
-        + '<div style="display:none"><div class="table-wrapper"><table><thead><tr><th>ชนิด</th><th>ถัง</th><th class="number">ลิตร</th></tr></thead><tbody>' + fuelReceivedHtml + '</tbody></table></div></div></div>' : '')
+            + '<div style="display:none"><div class="table-wrapper"><table><thead><tr><th>ชนิด</th><th>ถัง</th><th class="number">ลิตร</th></tr></thead><tbody>' + fuelReceivedHtml + '</tbody></table></div></div></div>' : '')
 
         + (creditCustHtml ? '<div class="card" style="margin-bottom:12px"><div class="card-header" style="cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\'"><h3>▶ ลูกหนี้เงินเชื่อ (' + (record.creditCustomers || []).length + ' รายการ)</h3></div>'
-        + '<div style="display:none"><div class="table-wrapper"><table><thead><tr><th>ชื่อ</th><th>ชนิด</th><th class="number">ลิตร</th><th class="number">จำนวนเงิน</th><th>อ้างอิง</th></tr></thead><tbody>' + creditCustHtml + '</tbody></table></div></div></div>' : '')
+            + '<div style="display:none"><div class="table-wrapper"><table><thead><tr><th>ชื่อ</th><th>ชนิด</th><th class="number">ลิตร</th><th class="number">จำนวนเงิน</th><th>อ้างอิง</th></tr></thead><tbody>' + creditCustHtml + '</tbody></table></div></div></div>' : '')
 
         + (expenseHtml ? '<div class="card" style="margin-bottom:12px"><div class="card-header" style="cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\'"><h3>▶ ค่าใช้จ่าย (' + fmt(siteExpenses) + ' บาท)</h3></div>'
-        + '<div style="display:none"><div class="table-wrapper"><table><thead><tr><th>หมวด</th><th>รายละเอียด</th><th class="number">จำนวนเงิน</th></tr></thead><tbody>' + expenseHtml + '</tbody></table></div></div></div>' : '')
+            + '<div style="display:none"><div class="table-wrapper"><table><thead><tr><th>หมวด</th><th>รายละเอียด</th><th class="number">จำนวนเงิน</th></tr></thead><tbody>' + expenseHtml + '</tbody></table></div></div></div>' : '')
 
         + (internalHtml ? '<div class="card" style="margin-bottom:12px"><div class="card-header" style="cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\'"><h3>▶ ใช้ภายในสถานี (' + fmt(internalUsageTotal) + ' บาท)</h3></div>'
-        + '<div style="display:none"><div class="table-wrapper"><table><thead><tr><th>ชนิด</th><th class="number">ลิตร</th><th>รายละเอียด</th></tr></thead><tbody>' + internalHtml + '</tbody></table></div></div></div>' : '')
+            + '<div style="display:none"><div class="table-wrapper"><table><thead><tr><th>ชนิด</th><th class="number">ลิตร</th><th>รายละเอียด</th></tr></thead><tbody>' + internalHtml + '</tbody></table></div></div></div>' : '')
 
         + '</div>';
 
     document.body.appendChild(modal);
-    requestAnimationFrame(function() { modal.classList.add('active'); });
+    requestAnimationFrame(function () { modal.classList.add('active'); });
 }
 
 function closeDrillDown() {
@@ -2256,7 +2730,7 @@ function renderDashboardCharts() {
     Chart.defaults.color = '#64748b';
 
     // 1) Revenue breakdown
-    (function() {
+    (function () {
         let fuel = 0, products = 0, other = 0;
         records.forEach(r => { const f = r.finance || {}; fuel += f.fuelSalesValue || 0; products += f.lubricantSales || 0; other += parseNum(f.otherIncome); });
         const labels = ['น้ำมัน', 'สินค้า/หล่อลื่น', 'อื่นๆ'];
@@ -2287,7 +2761,7 @@ function renderDashboardCharts() {
     })();
 
     // 2) By station
-    (function() {
+    (function () {
         const byStation = aggregateByStation(records);
         const stationIds = Object.keys(byStation);
         if (stationIds.length === 0) return;
@@ -2312,7 +2786,7 @@ function renderDashboardCharts() {
     })();
 
     // 3) Trend
-    (function() {
+    (function () {
         const trend = aggregateByDate(records);
         if (trend.length === 0) return;
         const labels = trend.map(([k]) => {
@@ -2340,7 +2814,7 @@ function renderDashboardCharts() {
     })();
 
     // 4) Expenses
-    (function() {
+    (function () {
         const cats = aggregateExpenseCategories(records);
         const entries = Object.entries(cats).filter(([, v]) => v > 0);
         if (entries.length === 0) {
@@ -2369,7 +2843,7 @@ function renderDashboardCharts() {
     })();
 
     // 5) Variance by station
-    (function() {
+    (function () {
         const byStation = aggregateByStation(records);
         const stationIds = Object.keys(byStation);
         if (stationIds.length === 0) return;
@@ -2398,7 +2872,7 @@ function renderDashboardCharts() {
     })();
 
     // 6) Fuel volume by type
-    (function() {
+    (function () {
         const fuelVolumes = {};
         records.forEach(r => {
             const liters = getMeterLitersByFuelType(r, r.stationId);
@@ -2434,7 +2908,7 @@ function renderDashboardCharts() {
     })();
 
     // 7) Fuel received by type
-    (function() {
+    (function () {
         const fuelReceivedAgg = {};
         records.forEach(r => {
             const tanks = REF.tanks.filter(t => t.stationId === r.stationId);
@@ -2702,6 +3176,14 @@ let _currentEntryStation = '';
 let _currentEntryDate = '';
 
 function _autoSaveBeforeSwitch() {
+    // FIX #1: commit pending input edit (see saveCurrentRecord)
+    try {
+        if (document.activeElement && typeof document.activeElement.blur === 'function'
+            && document.activeElement.tagName !== 'BODY') {
+            document.activeElement.blur();
+        }
+    } catch (e) { }
+
     // Save current record before switching to different station/date
     // Calculate finance totals to ensure carry-forward data is complete
     if (_currentEntryStation && _currentEntryDate) {
@@ -2874,6 +3356,11 @@ function onStationChange(existingRecord) {
         }
     }
 
+    // Always lock fuel prices into the record (prevent price changes affecting old records)
+    if (!hasFuelPrices(formData.fuelPrices)) {
+        formData.fuelPrices = DB.getFuelPrices();
+    }
+
     // Always sync meter start from previous day's end (ensure continuity)
     {
         const currentDate = document.getElementById('entryDate').value;
@@ -2934,8 +3421,21 @@ function onStationChange(existingRecord) {
         }
     });
 
-    // Save original snapshot for merge detection
+    // Pre-initialize meter readings for all meters at this station.
+    // Must happen BEFORE snapshot — otherwise renderMeterTab adds empty slots
+    // after the snapshot is captured, and every later save sends meter_readings
+    // in the delta (wiping concurrent edits on other devices).
+    const allMeters = REF.meters.filter(m =>
+        REF.tanks.some(t => t.key === m.tankKey && t.stationId === stationId));
+    allMeters.forEach(meter => {
+        if (!formData.meterReadings[meter.id]) {
+            formData.meterReadings[meter.id] = { start: '', end: '' };
+        }
+    });
+
+    // Save original snapshot for merge detection (tagged with identity)
     window._originalSnapshot = JSON.parse(JSON.stringify(formData));
+    window._snapshotFor = { stationId: stationId, date: date };
 
     // Track current station/date for auto-save on switch
     _currentEntryStation = stationId;
@@ -3184,9 +3684,9 @@ function renderStockTab(stationId) {
     // Summary: fuel sales by type
     const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPrices();
     const salesByType = {};
-    tanks.forEach(function(tank) {
+    tanks.forEach(function (tank) {
         const tankMeters = REF.meters.filter(m => m.tankKey === tank.key);
-        const sold = tankMeters.reduce(function(sum, m) {
+        const sold = tankMeters.reduce(function (sum, m) {
             const r = formData.meterReadings[m.id] || {};
             return sum + Math.max(0, parseNum(r.end) - parseNum(r.start));
         }, 0);
@@ -3210,7 +3710,7 @@ function renderStockTab(stationId) {
 
     var grandLiters = 0, grandAmount = 0, grandReceived = 0;
     var summaryRows = '';
-    Object.keys(salesByType).forEach(function(ft) {
+    Object.keys(salesByType).forEach(function (ft) {
         var d = salesByType[ft];
         var amount = d.liters * d.price;
         grandLiters += d.liters;
@@ -3290,16 +3790,16 @@ function printStockSummary() {
     var dateStr = document.getElementById('entryDate').value;
     if (!stationId || !dateStr) return;
 
-    var station = REF.stations.find(function(s) { return s.id === stationId; });
-    var tanks = REF.tanks.filter(function(t) { return t.stationId === stationId; });
+    var station = REF.stations.find(function (s) { return s.id === stationId; });
+    var tanks = REF.tanks.filter(function (t) { return t.stationId === stationId; });
     var fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPrices();
 
     // Stock detail rows
     var stockRows = '';
-    tanks.forEach(function(tank) {
+    tanks.forEach(function (tank) {
         var entry = formData.stockEntries[tank.key] || {};
-        var tankMeters = REF.meters.filter(function(m) { return m.tankKey === tank.key; });
-        var totalSold = tankMeters.reduce(function(sum, m) {
+        var tankMeters = REF.meters.filter(function (m) { return m.tankKey === tank.key; });
+        var totalSold = tankMeters.reduce(function (sum, m) {
             var r = formData.meterReadings[m.id] || {};
             return sum + Math.max(0, parseNum(r.end) - parseNum(r.start));
         }, 0);
@@ -3325,9 +3825,9 @@ function printStockSummary() {
 
     // Summary by fuel type
     var salesByType = {};
-    tanks.forEach(function(tank) {
-        var tankMeters = REF.meters.filter(function(m) { return m.tankKey === tank.key; });
-        var sold = tankMeters.reduce(function(sum, m) {
+    tanks.forEach(function (tank) {
+        var tankMeters = REF.meters.filter(function (m) { return m.tankKey === tank.key; });
+        var sold = tankMeters.reduce(function (sum, m) {
             var r = formData.meterReadings[m.id] || {};
             return sum + Math.max(0, parseNum(r.end) - parseNum(r.start));
         }, 0);
@@ -3351,7 +3851,7 @@ function printStockSummary() {
 
     var summaryRows = '';
     var grandLiters = 0, grandAmount = 0, grandReceived = 0;
-    Object.keys(salesByType).forEach(function(ft) {
+    Object.keys(salesByType).forEach(function (ft) {
         var d = salesByType[ft];
         var amount = d.liters * d.price;
         grandLiters += d.liters;
@@ -3419,9 +3919,10 @@ function printStockSummary() {
         + '</body></html>';
 
     var printWin = window.open('', '_blank');
+    if (!printWin) { showToast('Popup ถูกบล็อค กรุณาอนุญาต popup', 'error'); return; }
     printWin.document.write(printHtml);
     printWin.document.close();
-    printWin.onload = function() { printWin.print(); };
+    printWin.onload = function () { printWin.print(); };
 }
 
 // ===== PRODUCT SALES TAB =====
@@ -3485,7 +3986,7 @@ function renderProductTab() {
 }
 
 function addProductRow() {
-    formData.productSales.push({ productId: '', quantity: 1, unitPrice: 0 });
+    formData.productSales.push({ id: 'ps_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), productId: '', quantity: 1, unitPrice: 0 });
     renderProductTab();
 }
 
@@ -3498,6 +3999,7 @@ function removeProductRow(idx) {
 
 function updateProductRow(input, field) {
     const idx = parseInt(input.dataset.idx);
+    if (!formData.productSales[idx]) return;
     if (field === 'productId') {
         formData.productSales[idx].productId = input.value;
         const p = REF.products.find(pr => pr.id === input.value);
@@ -3711,7 +4213,7 @@ function renderExpenseTab() {
             <td class="number"><input type="number" step="0.01" value="${item.amount || ''}" data-idx="${idx}" onchange="updateExpenseRow(this, 'amount')"></td>
             <td><input type="text" value="${item.note || ''}" data-idx="${idx}" onchange="updateExpenseRow(this, 'note')"></td>
             <td style="text-align:center">${item.slip
-                ? '<div style="display:flex;align-items:center;gap:4px;justify-content:center"><img src="' + item.slip + '" style="width:36px;height:36px;border-radius:4px;cursor:pointer;object-fit:cover" onclick="previewSlip(this.src)"><button class="btn-delete-row" style="width:20px;height:20px;font-size:10px;padding:0" onclick="formData.expenses[' + idx + '].slip=null;renderExpenseTab()">✕</button></div>'
+                ? '<div style="display:flex;align-items:center;gap:4px;justify-content:center"><img src="' + item.slip + '" style="width:36px;height:36px;border-radius:4px;cursor:pointer;object-fit:cover" onclick="previewSlip(this.src)"><button class="btn-delete-row" style="width:20px;height:20px;font-size:10px;padding:0" onclick="if(formData.expenses[' + idx + '])formData.expenses[' + idx + '].slip=null;renderExpenseTab()">✕</button></div>'
                 : '<label class="btn btn-outline btn-sm" style="cursor:pointer;font-size:11px;padding:2px 6px"><input type="file" accept="image/*" style="display:none" onchange="attachExpenseSlip(this,' + idx + ')">📎 แนบ</label>'
             }</td>
             <td><button class="btn-delete-row" onclick="removeExpenseRow(${idx})">&#10005;</button></td>
@@ -3737,7 +4239,7 @@ function renderExpenseTab() {
 }
 
 function addExpenseRow() {
-    formData.expenses.push({ category: '', amount: 0, note: '' });
+    formData.expenses.push({ id: 'e_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), category: '', amount: 0, note: '' });
     renderExpenseTab();
 }
 
@@ -3748,6 +4250,7 @@ function removeExpenseRow(idx) {
 
 function updateExpenseRow(input, field) {
     const idx = parseInt(input.dataset.idx);
+    if (!formData.expenses[idx]) return;
     formData.expenses[idx][field] = input.value;
     if (field === 'amount') {
         // Update total
@@ -3768,22 +4271,22 @@ function renderCreditCardTab() {
         formData.finance.creditCardAmt = 0;
         formData.finance.slipCreditCard = null;
     }
-    const totalAmt = formData.creditCardEntries.reduce(function(s, e) { return s + parseNum(e.amount); }, 0);
+    const totalAmt = formData.creditCardEntries.reduce(function (s, e) { return s + parseNum(e.amount); }, 0);
     let html = '<div class="card"><div class="card-header"><h3>รายการเครดิตการ์ด</h3></div>'
         + '<div class="table-wrapper"><table><thead><tr><th style="width:60px">ลำดับ</th><th class="number">จำนวนเงิน (บาท)</th><th>หมายเหตุ</th><th>หลักฐาน</th><th style="width:40px"></th></tr></thead><tbody>';
-    formData.creditCardEntries.forEach(function(item, idx) {
+    formData.creditCardEntries.forEach(function (item, idx) {
         html += '<tr><td>' + (idx + 1) + '</td>'
-            + '<td class="number"><input type="number" step="0.01" value="' + (item.amount || '') + '" data-idx="' + idx + '" onchange="updateCardEntry(\'creditCard\',' + idx + ',\'amount\',this.value)"></td>'
-            + '<td><input type="text" value="' + (item.note || '') + '" data-idx="' + idx + '" onchange="updateCardEntry(\'creditCard\',' + idx + ',\'note\',this.value)" placeholder="เลขที่สลิป / หมายเหตุ"></td>'
+            + '<td class="number"><input type="number" step="0.01" value="' + (item.amount || '') + '" data-idx="' + idx + '" onchange="updateCardEntry(\'creditCard\',' + idx + ',\'amount\',this.value,this)"></td>'
+            + '<td><input type="text" value="' + (item.note || '') + '" data-idx="' + idx + '" onchange="updateCardEntry(\'creditCard\',' + idx + ',\'note\',this.value,this)" placeholder="เลขที่สลิป / หมายเหตุ"></td>'
             + '<td style="text-align:center">' + (item.slip
-                ? '<div style="display:flex;align-items:center;gap:4px;justify-content:center"><img src="' + item.slip + '" style="width:36px;height:36px;border-radius:4px;cursor:pointer;object-fit:cover" onclick="previewSlip(this.src)"><button class="btn-delete-row" style="width:20px;height:20px;font-size:10px;padding:0" onclick="formData.creditCardEntries[' + idx + '].slip=null;renderCreditCardTab()">✕</button></div>'
+                ? '<div style="display:flex;align-items:center;gap:4px;justify-content:center"><img src="' + item.slip + '" style="width:36px;height:36px;border-radius:4px;cursor:pointer;object-fit:cover" onclick="previewSlip(this.src)"><button class="btn-delete-row" style="width:20px;height:20px;font-size:10px;padding:0" onclick="if(formData.creditCardEntries[' + idx + '])formData.creditCardEntries[' + idx + '].slip=null;renderCreditCardTab()">✕</button></div>'
                 : '<label class="btn btn-outline btn-sm" style="cursor:pointer;font-size:11px;padding:2px 6px"><input type="file" accept="image/*" style="display:none" onchange="attachCardSlip(this,\'creditCard\',' + idx + ')">📎 แนบ</label>')
             + '</td>'
-            + '<td><button class="btn-delete-row" onclick="formData.creditCardEntries.splice(' + idx + ',1);renderCreditCardTab()">✕</button></td>'
+            + '<td><button class="btn-delete-row" onclick="if(formData.creditCardEntries.length>' + idx + ')formData.creditCardEntries.splice(' + idx + ',1);renderCreditCardTab()">✕</button></td>'
             + '</tr>';
     });
     html += '</tbody><tfoot><tr class="table-row-summary"><td>รวม</td><td class="number"><strong>' + fmt(totalAmt) + '</strong></td><td colspan="3"></td></tr></tfoot></table></div>'
-        + '<div style="text-align:center;margin-top:8px"><button class="btn btn-outline btn-sm" onclick="formData.creditCardEntries.push({amount:0,note:\'\',slip:null});renderCreditCardTab()">+ เพิ่มรายการ</button></div></div>';
+        + '<div style="text-align:center;margin-top:8px"><button class="btn btn-outline btn-sm" onclick="formData.creditCardEntries.push({id:\'cc_\'+Date.now()+\'_\'+Math.random().toString(36).slice(2,8),amount:0,note:\'\',slip:null});renderCreditCardTab()">+ เพิ่มรายการ</button></div></div>';
     el.innerHTML = html;
 }
 
@@ -3798,32 +4301,32 @@ function renderBluecardTab() {
         formData.finance.bluecardAmt = 0;
         formData.finance.slipBluecard = null;
     }
-    const totalAmt = formData.bluecardEntries.reduce(function(s, e) { return s + parseNum(e.amount); }, 0);
+    const totalAmt = formData.bluecardEntries.reduce(function (s, e) { return s + parseNum(e.amount); }, 0);
     let html = '<div class="card"><div class="card-header"><h3>รายการ Bluecard</h3></div>'
         + '<div class="table-wrapper"><table><thead><tr><th style="width:60px">ลำดับ</th><th class="number">จำนวนเงิน (บาท)</th><th>หมายเหตุ</th><th>หลักฐาน</th><th style="width:40px"></th></tr></thead><tbody>';
-    formData.bluecardEntries.forEach(function(item, idx) {
+    formData.bluecardEntries.forEach(function (item, idx) {
         html += '<tr><td>' + (idx + 1) + '</td>'
-            + '<td class="number"><input type="number" step="0.01" value="' + (item.amount || '') + '" data-idx="' + idx + '" onchange="updateCardEntry(\'bluecard\',' + idx + ',\'amount\',this.value)"></td>'
-            + '<td><input type="text" value="' + (item.note || '') + '" data-idx="' + idx + '" onchange="updateCardEntry(\'bluecard\',' + idx + ',\'note\',this.value)" placeholder="เลขที่สลิป / หมายเหตุ"></td>'
+            + '<td class="number"><input type="number" step="0.01" value="' + (item.amount || '') + '" data-idx="' + idx + '" onchange="updateCardEntry(\'bluecard\',' + idx + ',\'amount\',this.value,this)"></td>'
+            + '<td><input type="text" value="' + (item.note || '') + '" data-idx="' + idx + '" onchange="updateCardEntry(\'bluecard\',' + idx + ',\'note\',this.value,this)" placeholder="เลขที่สลิป / หมายเหตุ"></td>'
             + '<td style="text-align:center">' + (item.slip
-                ? '<div style="display:flex;align-items:center;gap:4px;justify-content:center"><img src="' + item.slip + '" style="width:36px;height:36px;border-radius:4px;cursor:pointer;object-fit:cover" onclick="previewSlip(this.src)"><button class="btn-delete-row" style="width:20px;height:20px;font-size:10px;padding:0" onclick="formData.bluecardEntries[' + idx + '].slip=null;renderBluecardTab()">✕</button></div>'
+                ? '<div style="display:flex;align-items:center;gap:4px;justify-content:center"><img src="' + item.slip + '" style="width:36px;height:36px;border-radius:4px;cursor:pointer;object-fit:cover" onclick="previewSlip(this.src)"><button class="btn-delete-row" style="width:20px;height:20px;font-size:10px;padding:0" onclick="if(formData.bluecardEntries[' + idx + '])formData.bluecardEntries[' + idx + '].slip=null;renderBluecardTab()">✕</button></div>'
                 : '<label class="btn btn-outline btn-sm" style="cursor:pointer;font-size:11px;padding:2px 6px"><input type="file" accept="image/*" style="display:none" onchange="attachCardSlip(this,\'bluecard\',' + idx + ')">📎 แนบ</label>')
             + '</td>'
-            + '<td><button class="btn-delete-row" onclick="formData.bluecardEntries.splice(' + idx + ',1);renderBluecardTab()">✕</button></td>'
+            + '<td><button class="btn-delete-row" onclick="if(formData.bluecardEntries.length>' + idx + ')formData.bluecardEntries.splice(' + idx + ',1);renderBluecardTab()">✕</button></td>'
             + '</tr>';
     });
     html += '</tbody><tfoot><tr class="table-row-summary"><td>รวม</td><td class="number"><strong>' + fmt(totalAmt) + '</strong></td><td colspan="3"></td></tr></tfoot></table></div>'
-        + '<div style="text-align:center;margin-top:8px"><button class="btn btn-outline btn-sm" onclick="formData.bluecardEntries.push({amount:0,note:\'\',slip:null});renderBluecardTab()">+ เพิ่มรายการ</button></div></div>';
+        + '<div style="text-align:center;margin-top:8px"><button class="btn btn-outline btn-sm" onclick="formData.bluecardEntries.push({id:\'bc_\'+Date.now()+\'_\'+Math.random().toString(36).slice(2,8),amount:0,note:\'\',slip:null});renderBluecardTab()">+ เพิ่มรายการ</button></div></div>';
     el.innerHTML = html;
 }
 
-function updateCardEntry(type, idx, field, value) {
+function updateCardEntry(type, idx, field, value, el) {
     var arr = type === 'creditCard' ? formData.creditCardEntries : formData.bluecardEntries;
     if (!arr[idx]) return;
-    arr[idx][field] = field === 'amount' ? value : value;
+    arr[idx][field] = field === 'amount' ? parseNum(value) : value;
     // Update total in footer
-    var total = arr.reduce(function(s, e) { return s + parseNum(e.amount); }, 0);
-    var table = event.target.closest('table');
+    var total = arr.reduce(function (s, e) { return s + parseNum(e.amount); }, 0);
+    var table = el ? el.closest('table') : null;
     if (table) {
         var foot = table.querySelector('tfoot .number strong');
         if (foot) foot.textContent = fmt(total);
@@ -3834,9 +4337,9 @@ function attachCardSlip(input, type, idx) {
     var file = input.files[0];
     if (!file) return;
     var reader = new FileReader();
-    reader.onload = function(e) {
+    reader.onload = function (e) {
         var img = new Image();
-        img.onload = function() {
+        img.onload = function () {
             var canvas = document.createElement('canvas');
             var maxW = 800, maxH = 800;
             var w = img.width, h = img.height;
@@ -3848,6 +4351,7 @@ function attachCardSlip(input, type, idx) {
             canvas.width = w; canvas.height = h;
             canvas.getContext('2d').drawImage(img, 0, 0, w, h);
             var arr = type === 'creditCard' ? formData.creditCardEntries : formData.bluecardEntries;
+            if (!arr[idx]) return;
             arr[idx].slip = canvas.toDataURL('image/jpeg', 0.6);
             if (type === 'creditCard') renderCreditCardTab();
             else renderBluecardTab();
@@ -3862,9 +4366,9 @@ function attachExpenseSlip(input, idx) {
     const file = input.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = function(e) {
+    reader.onload = function (e) {
         const img = new Image();
-        img.onload = function() {
+        img.onload = function () {
             const canvas = document.createElement('canvas');
             const maxW = 800, maxH = 800;
             let w = img.width, h = img.height;
@@ -3875,6 +4379,7 @@ function attachExpenseSlip(input, idx) {
             }
             canvas.width = w; canvas.height = h;
             canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+            if (!formData.expenses[idx]) return;
             formData.expenses[idx].slip = canvas.toDataURL('image/jpeg', 0.6);
             renderExpenseTab();
             showToast('แนบหลักฐานเรียบร้อย');
@@ -3963,7 +4468,7 @@ function renderInternalUsageTab() {
 
 function addInternalUsageRow() {
     if (!formData.internalUsage) formData.internalUsage = [];
-    formData.internalUsage.push({ tankKey: '', liters: '', note: '' });
+    formData.internalUsage.push({ id: 'u_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), tankKey: '', liters: '', note: '' });
     renderInternalUsageTab();
 }
 
@@ -3974,8 +4479,22 @@ function removeInternalUsageRow(idx) {
 
 function updateInternalUsageRow(input, field) {
     const idx = parseInt(input.dataset.idx);
+    if (!formData.internalUsage[idx]) return;
     formData.internalUsage[idx][field] = input.value;
     renderInternalUsageTab();
+}
+
+function filterCreditEntryRows(q) {
+    q = (q || '').trim().toLowerCase();
+    var rows = document.querySelectorAll('#creditRows tr');
+    rows.forEach(function (tr) {
+        if (!q) { tr.style.display = ''; tr.style.background = ''; return; }
+        var inputs = tr.querySelectorAll('input');
+        var match = false;
+        inputs.forEach(function (i) { if ((i.value || '').toLowerCase().indexOf(q) !== -1) match = true; });
+        tr.style.display = match ? '' : 'none';
+        tr.style.background = match ? '#fef3c7' : '';
+    });
 }
 
 // ===== CREDIT CUSTOMERS TAB =====
@@ -4009,7 +4528,10 @@ function renderCreditTab() {
     let html = warningHtml + `<div class="card">
         <div class="card-header">
             <h3>ลูกหนี้เงินเชื่อ</h3>
-            <button class="btn btn-sm btn-primary" onclick="printCreditCustomers()">🖨️ พิมพ์รายการลูกหนี้</button>
+            <div style="display:flex;gap:6px;align-items:center">
+                <input type="text" id="creditEntrySearch" placeholder="🔍 ค้นหาเลขที่อ้างอิง / ชื่อ / รหัส" oninput="filterCreditEntryRows(this.value)" style="padding:4px 8px;border:1px solid var(--gray-200);border-radius:var(--radius);font-size:12px;width:240px">
+                <button class="btn btn-sm btn-primary" onclick="printCreditCustomers()">🖨️ พิมพ์รายการลูกหนี้</button>
+            </div>
         </div>
         <datalist id="creditCusList">
             ${masterList.map(c => `<option value="${c.name}" label="${c.code} - ${c.name}">`).join('')}
@@ -4100,7 +4622,7 @@ function renderCreditTab() {
 }
 
 function addCreditRow() {
-    formData.creditCustomers.push({ name: '', cusCode: '', refNo: '', amount: 0, fuelType: '', liters: 0, licensePlate: '' });
+    formData.creditCustomers.push({ id: 'c_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), name: '', cusCode: '', refNo: '', amount: 0, fuelType: '', liters: 0, licensePlate: '' });
     renderCreditTab();
 }
 
@@ -4111,6 +4633,7 @@ function removeCreditRow(idx) {
 
 function matchCreditCustomer(input) {
     const idx = parseInt(input.dataset.idx);
+    if (!formData.creditCustomers[idx]) return;
     const val = input.value.trim();
     const masterList = getCreditMasterList();
     const match = masterList.find(c => c.name === val);
@@ -4128,6 +4651,7 @@ function matchCreditCustomer(input) {
 
 function matchCreditByCode(input) {
     const idx = parseInt(input.dataset.idx);
+    if (!formData.creditCustomers[idx]) return;
     const val = input.value.trim();
     const masterList = getCreditMasterList();
     const match = masterList.find(c => c.code === val);
@@ -4151,9 +4675,9 @@ function getCreditMasterList() {
     var custom = _customCreditCustomersCache || [];
     // Merge: base + custom, deduplicate by code
     var map = {};
-    base.forEach(function(c) { map[c.code] = c; });
-    custom.forEach(function(c) { map[c.code] = c; });
-    return Object.values(map).sort(function(a, b) { return (a.code || '').localeCompare(b.code || ''); });
+    base.forEach(function (c) { map[c.code] = c; });
+    custom.forEach(function (c) { map[c.code] = c; });
+    return Object.values(map).sort(function (a, b) { return (a.code || '').localeCompare(b.code || ''); });
 }
 
 async function loadCustomCreditCustomers() {
@@ -4162,7 +4686,7 @@ async function loadCustomCreditCustomers() {
         if (!error && data) {
             _customCreditCustomersCache = data;
         }
-    } catch(e) {}
+    } catch (e) { }
     // Also migrate localStorage data to Supabase if exists
     try {
         var local = JSON.parse(localStorage.getItem('customCreditCustomers') || '[]');
@@ -4175,7 +4699,7 @@ async function loadCustomCreditCustomers() {
             var { data: d2 } = await supabaseClient.from('custom_credit_customers').select('*').order('code');
             if (d2) _customCreditCustomersCache = d2;
         }
-    } catch(e) {}
+    } catch (e) { }
 }
 
 async function addCustomCreditCustomer(code, name) {
@@ -4198,7 +4722,7 @@ function renderCustomCusList() {
     var html = '<div style="font-size:12px;color:#666;margin-bottom:6px">รายชื่อที่เพิ่มเอง (' + custom.length + ' ราย)</div>';
     html += '<div style="max-height:200px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px">';
     html += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th style="padding:4px 8px;background:#f5f5f5;text-align:left;border-bottom:1px solid #ddd">รหัส</th><th style="padding:4px 8px;background:#f5f5f5;text-align:left;border-bottom:1px solid #ddd">ชื่อลูกหนี้</th><th style="padding:4px 8px;background:#f5f5f5;width:50px;border-bottom:1px solid #ddd"></th></tr></thead><tbody>';
-    custom.forEach(function(c) {
+    custom.forEach(function (c) {
         html += '<tr><td style="padding:3px 8px;border-bottom:1px solid #eee">' + c.code + '</td><td style="padding:3px 8px;border-bottom:1px solid #eee">' + c.name + '</td><td style="padding:3px 8px;border-bottom:1px solid #eee;text-align:center"><button class="btn-delete-row" onclick="removeCustomCreditCustomer(\'' + c.code + '\')">✕</button></td></tr>';
     });
     html += '</tbody></table></div>';
@@ -4217,7 +4741,7 @@ function getCreditItemLabel(fuelType) {
     if (!fuelType) return '-';
     if (fuelType.startsWith('product:')) {
         var prodId = fuelType.replace('product:', '');
-        var prod = REF.products.find(function(p) { return p.id === prodId; });
+        var prod = REF.products.find(function (p) { return p.id === prodId; });
         return prod ? prod.name : fuelType;
     }
     return REF.fuelTypeLabels[fuelType] || fuelType || '-';
@@ -4225,6 +4749,7 @@ function getCreditItemLabel(fuelType) {
 
 function updateCreditRow(input, field) {
     const idx = parseInt(input.dataset.idx);
+    if (!formData.creditCustomers[idx]) return;
     // Store numeric fields as numbers, not strings
     if (field === 'liters' || field === 'amount') {
         formData.creditCustomers[idx][field] = parseNum(input.value);
@@ -4282,13 +4807,36 @@ function updateCreditRow(input, field) {
         }
     }
 
-    if (field === 'amount' || field === 'liters' || field === 'fuelType') {
-        // Update totals in footer
-        const totalCredit = formData.creditCustomers.reduce((sum, c) => sum + parseNum(c.amount), 0);
-        const totalLiters = formData.creditCustomers.reduce((sum, c) => sum + parseNum(c.liters), 0);
-        const footCells = input.closest('table').querySelectorAll('tfoot td.number');
-        if (footCells[0]) footCells[0].textContent = fmt(totalLiters);
-        if (footCells[1]) footCells[1].textContent = fmt(totalCredit);
+    if (field === 'amount' || field === 'liters' || field === 'fuelType' || field === 'creditType') {
+        // FIX #3: Update totals in footer correctly.
+        // Footer has td.number cells in order:
+        //   [0] totalMeter (รวมผ่านมิเตอร์)
+        //   [1] totalExternal (รวมนอกระบบ) — only present if totalExternal > 0
+        //   [last] totalCredit (รวมเงินเชื่อทั้งหมด)
+        // Previous code put totalLiters in [0] and totalCredit in [1], which
+        // displayed wrong numbers while editing, making users believe their
+        // edits didn't register. Recompute and assign by role, not by index.
+        const meterItems = formData.creditCustomers.filter(c => (c.creditType || 'meter') === 'meter');
+        const externalItems = formData.creditCustomers.filter(c => c.creditType === 'external');
+        const totalMeter = meterItems.reduce((sum, c) => sum + parseNum(c.amount), 0);
+        const totalExternal = externalItems.reduce((sum, c) => sum + parseNum(c.amount), 0);
+        const totalCredit = totalMeter + totalExternal;
+        const tableEl = input.closest('table');
+        if (tableEl) {
+            const footCells = tableEl.querySelectorAll('tfoot td.number');
+            if (totalExternal > 0 && footCells.length >= 3) {
+                footCells[0].textContent = fmt(totalMeter);
+                footCells[1].textContent = fmt(totalExternal);
+                footCells[2].textContent = fmt(totalCredit);
+            } else if (footCells.length >= 2) {
+                // External row not rendered — just meter + total
+                footCells[0].textContent = fmt(totalMeter);
+                footCells[footCells.length - 1].textContent = fmt(totalCredit);
+                // If external becomes > 0 after previously being 0 (new external added),
+                // re-render the tab so the external row appears.
+                if (totalExternal > 0) renderCreditTab();
+            }
+        }
     }
 }
 
@@ -4296,7 +4844,9 @@ function updateCreditRow(input, field) {
 function renderTaxInvoiceTab() {
     const el = document.getElementById('subtab-taxinvoice');
     if (!el) return;
-    const inv = formData.taxInvoices || { abbreviated: [], full: [] };
+    const rawInv = formData.taxInvoices || {};
+    const inv = { abbreviated: Array.isArray(rawInv.abbreviated) ? rawInv.abbreviated : [], full: Array.isArray(rawInv.full) ? rawInv.full : [] };
+    formData.taxInvoices = inv;
 
     function renderInvoiceSection(type, title, subtitle, items) {
         let html = `<div class="card" style="margin-bottom:16px">
@@ -4348,18 +4898,23 @@ function renderTaxInvoiceTab() {
 
 function addTaxInvoiceRow(type) {
     if (!formData.taxInvoices) formData.taxInvoices = { abbreviated: [], full: [] };
+    if (!Array.isArray(formData.taxInvoices[type])) formData.taxInvoices[type] = [];
     formData.taxInvoices[type].push({ bookNo: '', invoiceNo: '', copies: 1, amount: 0 });
     renderTaxInvoiceTab();
 }
 
 function removeTaxInvoiceRow(type, idx) {
+    if (!formData.taxInvoices || !Array.isArray(formData.taxInvoices[type])) return;
     formData.taxInvoices[type].splice(idx, 1);
     renderTaxInvoiceTab();
 }
 
 function updateTaxInvoice(input) {
     const { type, idx, field } = input.dataset;
-    formData.taxInvoices[type][parseInt(idx)][field] = field === 'copies' || field === 'amount' ? parseNum(input.value) : input.value;
+    if (!formData.taxInvoices || !Array.isArray(formData.taxInvoices[type])) return;
+    const item = formData.taxInvoices[type][parseInt(idx)];
+    if (!item) return;
+    item[field] = field === 'copies' || field === 'amount' ? parseNum(input.value) : input.value;
     renderTaxInvoiceTab();
 }
 
@@ -4368,10 +4923,11 @@ function printTaxInvoiceSummary() {
     var dateStr = document.getElementById('entryDate').value;
     if (!stationId || !dateStr) return;
 
-    var station = REF.stations.find(function(s) { return s.id === stationId; });
-    var inv = formData.taxInvoices || { abbreviated: [], full: [] };
+    var station = REF.stations.find(function (s) { return s.id === stationId; });
+    var rawInvP = formData.taxInvoices || {};
+    var inv = { abbreviated: Array.isArray(rawInvP.abbreviated) ? rawInvP.abbreviated : [], full: Array.isArray(rawInvP.full) ? rawInvP.full : [] };
 
-    if ((inv.abbreviated || []).length === 0 && (inv.full || []).length === 0) {
+    if (inv.abbreviated.length === 0 && inv.full.length === 0) {
         showToast('ไม่มีรายการใบกำกับภาษี', 'error'); return;
     }
 
@@ -4379,7 +4935,7 @@ function printTaxInvoiceSummary() {
         if (!items || items.length === 0) return '';
         var totalAmt = 0, totalVat = 0, totalCopies = 0;
         var rows = '';
-        items.forEach(function(item, i) {
+        items.forEach(function (item, i) {
             var amt = parseNum(item.amount);
             var vat = amt > 0 ? Math.round((amt / 1.07 * 0.07) * 100) / 100 : 0;
             var copies = parseNum(item.copies) || 1;
@@ -4422,7 +4978,7 @@ function printTaxInvoiceSummary() {
     // Grand total
     var allItems = (inv.abbreviated || []).concat(inv.full || []);
     var grandAmt = 0, grandVat = 0;
-    allItems.forEach(function(item) {
+    allItems.forEach(function (item) {
         var amt = parseNum(item.amount);
         var vat = amt > 0 ? Math.round((amt / 1.07 * 0.07) * 100) / 100 : 0;
         grandAmt += amt;
@@ -4493,6 +5049,7 @@ function printTaxInvoiceSummary() {
         + '</body></html>';
 
     var printWin = window.open('', '_blank');
+    if (!printWin) { showToast('Popup ถูกบล็อค กรุณาอนุญาต popup', 'error'); return; }
     printWin.document.write(printHtml);
     printWin.document.close();
 }
@@ -4502,7 +5059,7 @@ function printCreditCustomers() {
     var dateStr = document.getElementById('entryDate').value;
     if (!stationId || !dateStr) return;
 
-    var station = REF.stations.find(function(s) { return s.id === stationId; });
+    var station = REF.stations.find(function (s) { return s.id === stationId; });
     var customers = formData.creditCustomers || [];
     if (customers.length === 0) { showToast('ไม่มีรายการลูกหนี้เงินเชื่อ', 'error'); return; }
 
@@ -4511,7 +5068,7 @@ function printCreditCustomers() {
     // Build rows
     var totalLiters = 0, totalAmount = 0;
     var rows = '';
-    customers.forEach(function(c, i) {
+    customers.forEach(function (c, i) {
         var amt = parseNum(c.amount);
         var lit = parseNum(c.liters);
         totalLiters += lit;
@@ -4523,7 +5080,7 @@ function printCreditCustomers() {
             + '<td>' + (c.refNo || '-') + '</td>'
             + '<td>' + (c.licensePlate || '-') + '</td>'
             + '<td>' + getCreditItemLabel(c.fuelType) + '</td>'
-            + '<td style="text-align:right">' + (function(){ if ((c.fuelType||'').startsWith('product:')) { var pr = REF.products.find(function(p){return p.id===c.fuelType.replace('product:','');}); return pr ? fmt(pr.price) : '-'; } return fuelPrices[c.fuelType] ? fmt(fuelPrices[c.fuelType]) : '-'; })() + '</td>'
+            + '<td style="text-align:right">' + (function () { if ((c.fuelType || '').startsWith('product:')) { var pr = REF.products.find(function (p) { return p.id === c.fuelType.replace('product:', ''); }); return pr ? fmt(pr.price) : '-'; } return fuelPrices[c.fuelType] ? fmt(fuelPrices[c.fuelType]) : '-'; })() + '</td>'
             + '<td style="text-align:right">' + fmt(lit) + '</td>'
             + '<td style="text-align:right;font-weight:bold">' + fmt(amt) + '</td>'
             + '</tr>';
@@ -4531,7 +5088,7 @@ function printCreditCustomers() {
 
     // Summary by fuel type
     var byFuel = {};
-    customers.forEach(function(c) {
+    customers.forEach(function (c) {
         var ft = c.fuelType || 'other';
         if (!byFuel[ft]) byFuel[ft] = { liters: 0, amount: 0, count: 0 };
         byFuel[ft].liters += parseNum(c.liters);
@@ -4539,7 +5096,7 @@ function printCreditCustomers() {
         byFuel[ft].count++;
     });
     var fuelSummaryRows = '';
-    Object.keys(byFuel).forEach(function(ft) {
+    Object.keys(byFuel).forEach(function (ft) {
         var d = byFuel[ft];
         fuelSummaryRows += '<tr>'
             + '<td>' + getCreditItemLabel(ft) + '</td>'
@@ -4609,6 +5166,7 @@ function printCreditCustomers() {
         + '</body></html>';
 
     var printWin = window.open('', '_blank');
+    if (!printWin) { showToast('Popup ถูกบล็อค กรุณาอนุญาต popup', 'error'); return; }
     printWin.document.write(printHtml);
     printWin.document.close();
 }
@@ -4662,7 +5220,7 @@ function renderSummaryTab() {
     }, 0);
 
     // Finance values
-    const fin = formData.finance;
+    const fin = formData.finance || {};
     const otherIncome = parseNum(fin.otherIncome);
     const totalGross = fuelSalesValue + lubricantSales + otherIncome;
     // Auto-calculate creditSales from creditCustomers entries (เฉพาะผ่านมิเตอร์)
@@ -4695,8 +5253,8 @@ function renderSummaryTab() {
                 </div>
                 <button class="btn btn-sm ${fuelPricesUnlocked ? 'btn-danger' : 'btn-outline'}" onclick="toggleFuelPriceLock()">
                     ${fuelPricesUnlocked
-                        ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg> ล็อกราคา'
-                        : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> แก้ไขราคา'}
+            ? '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg> ล็อกราคา'
+            : '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> แก้ไขราคา'}
                 </button>
             </div>
             ${!hasPrices ? '<div class="price-warning">กรุณาตั้งราคาน้ำมันก่อนใช้งาน (กดปุ่ม "แก้ไขราคา")</div>' : ''}
@@ -4724,7 +5282,7 @@ function renderSummaryTab() {
                 const data = fuelSalesByType[ft];
                 return `<div class="summary-row">
                     <span class="summary-label">${label} (${fmt(data.liters)} ลิตร x ${fmt(data.pricePerLiter)})</span>
-                    <span class="summary-value" id="fuel-val-${ft.replace(/\s/g,'')}">${fmt(data.total)}</span>
+                    <span class="summary-value" id="fuel-val-${ft.replace(/\s/g, '')}">${fmt(data.total)}</span>
                 </div>`;
             }).join('')}
             <div class="summary-row total">
@@ -4814,9 +5372,9 @@ function renderSummaryTab() {
                             onchange="formData.finance.cashDay=this.value;renderSummaryTab()" placeholder="0.00">
                         <div class="slip-container">
                             ${fin.slipDay
-                                ? '<div class="slip-wrapper"><img src="' + fin.slipDay + '" class="slip-thumbnail" onclick="previewSlip(this.src)"><button class="btn-delete-row slip-delete-btn" onclick="removeSlip(\'Day\')">&#10005;</button></div>'
-                                : '<label class="btn btn-sm btn-outline" style="cursor:pointer"><input type="file" accept="image/*" style="display:none" onchange="attachSlip(this,\'Day\')">แนบสลิป</label>'
-                            }
+            ? '<div class="slip-wrapper"><img src="' + fin.slipDay + '" class="slip-thumbnail" onclick="previewSlip(this.src)"><button class="btn-delete-row slip-delete-btn" onclick="removeSlip(\'Day\')">&#10005;</button></div>'
+            : '<label class="btn btn-sm btn-outline" style="cursor:pointer"><input type="file" accept="image/*" style="display:none" onchange="attachSlip(this,\'Day\')">แนบสลิป</label>'
+        }
                         </div>
                     </div>
                     <div class="cash-shift-box">
@@ -4825,9 +5383,9 @@ function renderSummaryTab() {
                             onchange="formData.finance.cashNight=this.value;renderSummaryTab()" placeholder="0.00">
                         <div class="slip-container">
                             ${fin.slipNight
-                                ? '<div class="slip-wrapper"><img src="' + fin.slipNight + '" class="slip-thumbnail" onclick="previewSlip(this.src)"><button class="btn-delete-row slip-delete-btn" onclick="removeSlip(\'Night\')">&#10005;</button></div>'
-                                : '<label class="btn btn-sm btn-outline" style="cursor:pointer"><input type="file" accept="image/*" style="display:none" onchange="attachSlip(this,\'Night\')">แนบสลิป</label>'
-                            }
+            ? '<div class="slip-wrapper"><img src="' + fin.slipNight + '" class="slip-thumbnail" onclick="previewSlip(this.src)"><button class="btn-delete-row slip-delete-btn" onclick="removeSlip(\'Night\')">&#10005;</button></div>'
+            : '<label class="btn btn-sm btn-outline" style="cursor:pointer"><input type="file" accept="image/*" style="display:none" onchange="attachSlip(this,\'Night\')">แนบสลิป</label>'
+        }
                         </div>
                     </div>
                 </div>
@@ -4862,9 +5420,9 @@ function printDailySummary() {
 
     // Fuel sales
     const fuelSalesByType = {};
-    tanks.forEach(function(tank) {
+    tanks.forEach(function (tank) {
         const meters = REF.meters.filter(m => m.tankKey === tank.key);
-        const liters = meters.reduce(function(sum, m) {
+        const liters = meters.reduce(function (sum, m) {
             const r = formData.meterReadings[m.id] || {};
             return sum + Math.max(0, parseNum(r.end) - parseNum(r.start));
         }, 0);
@@ -4872,24 +5430,24 @@ function printDailySummary() {
         fuelSalesByType[tank.fuelType].liters += liters;
     });
     var fuelSalesValue = 0;
-    Object.keys(fuelSalesByType).forEach(function(ft) {
+    Object.keys(fuelSalesByType).forEach(function (ft) {
         fuelSalesByType[ft].total = fuelSalesByType[ft].liters * fuelSalesByType[ft].price;
         fuelSalesValue += fuelSalesByType[ft].total;
     });
 
     var lubricantSales = 0;
     var productRows = '';
-    (formData.productSales || []).forEach(function(item) {
-        var p = REF.products.find(function(pr) { return pr.id === item.productId; });
+    (formData.productSales || []).forEach(function (item) {
+        var p = REF.products.find(function (pr) { return pr.id === item.productId; });
         var qty = parseNum(item.quantity);
         if (!p || qty <= 0) return;
         var amt = qty * p.price;
         lubricantSales += amt;
         productRows += '<tr><td>' + p.name + '</td><td style="text-align:right">' + fmt(p.price) + '</td><td style="text-align:right">' + qty + '</td><td style="text-align:right">' + fmt(amt) + '</td></tr>';
     });
-    var siteExpenses = (formData.expenses || []).reduce(function(sum, e) { return sum + parseNum(e.amount); }, 0);
-    var internalUsageTotal = (formData.internalUsage || []).reduce(function(sum, item) {
-        var tank = tanks.find(function(t) { return t.key === item.tankKey; });
+    var siteExpenses = (formData.expenses || []).reduce(function (sum, e) { return sum + parseNum(e.amount); }, 0);
+    var internalUsageTotal = (formData.internalUsage || []).reduce(function (sum, item) {
+        var tank = tanks.find(function (t) { return t.key === item.tankKey; });
         var ft = tank ? tank.fuelType : '';
         var price = ft ? parseNum(fuelPrices[ft]) : 0;
         return sum + (parseNum(item.liters) * price);
@@ -4898,9 +5456,10 @@ function printDailySummary() {
     var fin = formData.finance || {};
     var otherIncome = parseNum(fin.otherIncome);
     var totalGross = fuelSalesValue + lubricantSales + otherIncome;
-    var creditSales = (formData.creditCustomers || []).filter(function(c) { return (c.creditType || 'meter') === 'meter'; }).reduce(function(s, c) { return s + parseNum(c.amount); }, 0);
-    var creditCard = (formData.creditCardEntries || []).reduce(function(s, e) { return s + parseNum(e.amount); }, 0) || parseNum(fin.creditCardAmt);
-    var bluecard = (formData.bluecardEntries || []).reduce(function(s, e) { return s + parseNum(e.amount); }, 0) || parseNum(fin.bluecardAmt);
+    var creditSales = (formData.creditCustomers || []).filter(function (c) { return (c.creditType || 'meter') === 'meter'; }).reduce(function (s, c) { return s + parseNum(c.amount); }, 0);
+    var creditSalesExternal = (formData.creditCustomers || []).filter(function (c) { return c.creditType === 'external'; }).reduce(function (s, c) { return s + parseNum(c.amount); }, 0);
+    var creditCard = (formData.creditCardEntries || []).reduce(function (s, e) { return s + parseNum(e.amount); }, 0) || parseNum(fin.creditCardAmt);
+    var bluecard = (formData.bluecardEntries || []).reduce(function (s, e) { return s + parseNum(e.amount); }, 0) || parseNum(fin.bluecardAmt);
     var qrTransfer = parseNum(fin.qrTransferAmt);
     var tradeDiscount = parseNum(fin.tradeDiscount) || parseNum(fin.discounts);
     var totalDeductions = creditSales + creditCard + bluecard + qrTransfer + tradeDiscount + siteExpenses + internalUsageTotal;
@@ -4913,7 +5472,7 @@ function printDailySummary() {
     // Fuel received
     var fuelReceivedRows = '';
     var totalReceived = 0;
-    tanks.forEach(function(tank) {
+    tanks.forEach(function (tank) {
         var se = (formData.stockEntries || {})[tank.key];
         if (se && parseNum(se.fuelAdded) > 0) {
             var added = parseNum(se.fuelAdded);
@@ -4924,7 +5483,7 @@ function printDailySummary() {
 
     // Expenses detail
     var expenseRows = '';
-    (formData.expenses || []).forEach(function(e) {
+    (formData.expenses || []).forEach(function (e) {
         if (parseNum(e.amount) > 0) {
             expenseRows += '<tr><td>' + (e.category || '-') + '</td><td>' + (e.note || '') + '</td><td style="text-align:right">' + fmt(e.amount) + '</td></tr>';
         }
@@ -4932,7 +5491,7 @@ function printDailySummary() {
 
     // Credit card detail
     var ccRows = '';
-    (formData.creditCardEntries || []).forEach(function(e, i) {
+    (formData.creditCardEntries || []).forEach(function (e, i) {
         if (parseNum(e.amount) > 0) {
             ccRows += '<tr><td>' + (i + 1) + '</td><td>' + (e.note || '-') + '</td><td style="text-align:right">' + fmt(e.amount) + '</td></tr>';
         }
@@ -4940,7 +5499,7 @@ function printDailySummary() {
 
     // Bluecard detail
     var bcRows = '';
-    (formData.bluecardEntries || []).forEach(function(e, i) {
+    (formData.bluecardEntries || []).forEach(function (e, i) {
         if (parseNum(e.amount) > 0) {
             bcRows += '<tr><td>' + (i + 1) + '</td><td>' + (e.note || '-') + '</td><td style="text-align:right">' + fmt(e.amount) + '</td></tr>';
         }
@@ -4948,13 +5507,13 @@ function printDailySummary() {
 
     // Credit customers
     var creditRows = '';
-    (formData.creditCustomers || []).forEach(function(c) {
+    (formData.creditCustomers || []).forEach(function (c) {
         creditRows += '<tr><td>' + (c.name || '-') + '</td><td>' + getCreditItemLabel(c.fuelType) + '</td><td style="text-align:right">' + fmt(c.liters) + '</td><td style="text-align:right">' + fmt(c.amount) + '</td></tr>';
     });
 
     // Build fuel sales rows
     var fuelRows = '';
-    Object.keys(fuelSalesByType).forEach(function(ft) {
+    Object.keys(fuelSalesByType).forEach(function (ft) {
         var d = fuelSalesByType[ft];
         fuelRows += '<tr><td>' + (REF.fuelTypeLabels[ft] || ft) + '</td><td style="text-align:right">' + fmt(d.liters) + '</td><td style="text-align:right">' + fmt(d.price) + '</td><td style="text-align:right">' + fmt(d.total) + '</td></tr>';
     });
@@ -5004,10 +5563,10 @@ function printDailySummary() {
 
         // Product sales
         + (productRows ? '<div class="section-title">รายได้จากสินค้า</div>'
-        + '<table><thead><tr><th>สินค้า</th><th style="text-align:right">ราคา/หน่วย</th><th style="text-align:right">จำนวน</th><th style="text-align:right">จำนวนเงิน</th></tr></thead>'
-        + '<tbody>' + productRows
-        + '<tr class="total-row"><td>รวมรายได้สินค้า</td><td></td><td></td><td style="text-align:right">' + fmt(lubricantSales) + '</td></tr>'
-        + '</tbody></table>' : '')
+            + '<table><thead><tr><th>สินค้า</th><th style="text-align:right">ราคา/หน่วย</th><th style="text-align:right">จำนวน</th><th style="text-align:right">จำนวนเงิน</th></tr></thead>'
+            + '<tbody>' + productRows
+            + '<tr class="total-row"><td>รวมรายได้สินค้า</td><td></td><td></td><td style="text-align:right">' + fmt(lubricantSales) + '</td></tr>'
+            + '</tbody></table>' : '')
 
         // Two column: Income & Deductions
         + '<div class="two-col">'
@@ -5027,8 +5586,8 @@ function printDailySummary() {
         + '<div>'
         + '<div class="section-title">รายการหัก</div>'
         + '<table>'
-        + '<tr><td>เงินเชื่อผ่านมิเตอร์ (' + formData.creditCustomers.filter(function(c){return (c.creditType||"meter")==="meter"}).length + ' ราย)</td><td style="text-align:right">' + fmt(creditSales) + '</td></tr>'
-        + (creditSalesExternal > 0 ? '<tr style="color:#f59e0b"><td>เงินเชื่อนอกระบบ (' + formData.creditCustomers.filter(function(c){return c.creditType==="external"}).length + ' ราย) *ไม่คิดในบัญชี</td><td style="text-align:right">' + fmt(creditSalesExternal) + '</td></tr>' : '')
+        + '<tr><td>เงินเชื่อผ่านมิเตอร์ (' + (formData.creditCustomers || []).filter(function (c) { return (c.creditType || "meter") === "meter" }).length + ' ราย)</td><td style="text-align:right">' + fmt(creditSales) + '</td></tr>'
+        + (creditSalesExternal > 0 ? '<tr style="color:#f59e0b"><td>เงินเชื่อนอกระบบ (' + (formData.creditCustomers || []).filter(function (c) { return c.creditType === "external" }).length + ' ราย) *ไม่คิดในบัญชี</td><td style="text-align:right">' + fmt(creditSalesExternal) + '</td></tr>' : '')
         + '<tr><td>เครดิตการ์ด</td><td style="text-align:right">' + fmt(creditCard) + '</td></tr>'
         + '<tr><td>Bluecard</td><td style="text-align:right">' + fmt(bluecard) + '</td></tr>'
         + '<tr><td>เงินโอน / QR</td><td style="text-align:right">' + fmt(qrTransfer) + '</td></tr>'
@@ -5084,6 +5643,7 @@ function printDailySummary() {
         + '</body></html>';
 
     var printWin = window.open('', '_blank');
+    if (!printWin) { showToast('Popup ถูกบล็อค กรุณาอนุญาต popup', 'error'); return; }
     printWin.document.write(printHtml);
     printWin.document.close();
 }
@@ -5112,9 +5672,9 @@ function attachSlip(input, shift) {
     if (!file) return;
     // Compress image before storing
     const reader = new FileReader();
-    reader.onload = function(e) {
+    reader.onload = function (e) {
         const img = new Image();
-        img.onload = function() {
+        img.onload = function () {
             const canvas = document.createElement('canvas');
             const maxW = 800, maxH = 800;
             let w = img.width, h = img.height;
@@ -5217,6 +5777,17 @@ function cascadeUpdateNextDay(stationId, date, savedRecord) {
 
 // ===== SAVE RECORD =====
 function saveCurrentRecord() {
+    // FIX #1: Force-commit any pending input edit before reading formData.
+    // On mobile Safari the tap on "Save" can fire BEFORE the focused input's
+    // `onchange` handler, causing the last-typed value (e.g. amount in credit
+    // customer row) to be lost. Blurring triggers the change handler first.
+    try {
+        if (document.activeElement && typeof document.activeElement.blur === 'function'
+            && document.activeElement.tagName !== 'BODY') {
+            document.activeElement.blur();
+        }
+    } catch (e) { }
+
     const stationId = document.getElementById('entryStation').value;
     const date = document.getElementById('entryDate').value;
     const staffId = document.getElementById('entryStaff').value;
@@ -5262,7 +5833,7 @@ function saveCurrentRecord() {
     const creditCardTotal = (formData.creditCardEntries || []).reduce((s, e) => s + parseNum(e.amount), 0) || parseNum(formData.finance.creditCardAmt);
     const bluecardTotal = (formData.bluecardEntries || []).reduce((s, e) => s + parseNum(e.amount), 0) || parseNum(formData.finance.bluecardAmt);
 
-    const fin = formData.finance;
+    const fin = formData.finance || {};
     fin.creditCardAmt = creditCardTotal;
     fin.bluecardAmt = bluecardTotal;
     const otherIncome = parseNum(fin.otherIncome);
@@ -5314,7 +5885,7 @@ function saveCurrentRecord() {
     editingRecord = null;
 
     // Auto-advance to next sub-tab
-    const tabOrder = ['meters','stock','products','productstock','expenses','creditcard','bluecard','internalusage','credit','summary','taxinvoice'];
+    const tabOrder = ['meters', 'stock', 'products', 'productstock', 'expenses', 'creditcard', 'bluecard', 'internalusage', 'credit', 'summary', 'taxinvoice'];
     const activeBtn = document.querySelector('.sub-tab.active');
     if (activeBtn) {
         const currentTab = activeBtn.dataset.subtab;
@@ -5454,9 +6025,9 @@ function renderReference(el) {
                 <table><thead><tr><th>รหัส</th><th>ชื่อสาขา</th><th>จำนวนถัง</th></tr></thead>
                 <tbody>
                     ${REF.stations.map(s => {
-                        const tankCount = REF.tanks.filter(t => t.stationId === s.id).length;
-                        return `<tr><td>${s.id}</td><td>${s.name}</td><td>${tankCount}</td></tr>`;
-                    }).join('')}
+        const tankCount = REF.tanks.filter(t => t.stationId === s.id).length;
+        return `<tr><td>${s.id}</td><td>${s.name}</td><td>${tankCount}</td></tr>`;
+    }).join('')}
                 </tbody></table>
             </div>
         </div>
@@ -5729,7 +6300,7 @@ function renderUserManagement(el) {
             html += `<tr>
                 <td><input value="${u.display_name || ''}" style="border:1px solid var(--gray-200);border-radius:6px;padding:6px 10px;width:120px"
                     onchange="updateUserProfile('${u.id}','display_name',this.value)" ${isSelf ? '' : (Auth.isAdmin() ? '' : 'disabled')}></td>
-                <td style="font-size:13px;color:var(--gray-500)">${u.email || u.id.slice(0,8) + '...'}</td>
+                <td style="font-size:13px;color:var(--gray-500)">${u.email || u.id.slice(0, 8) + '...'}</td>
                 <td><select onchange="updateUserProfile('${u.id}','role',this.value)" ${isSelf ? 'disabled' : ''} style="padding:6px 10px;border-radius:6px;border:1px solid var(--gray-200)">
                     <option value="entry" ${u.role === 'entry' ? 'selected' : ''}>ผู้บันทึก</option>
                     <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>ผู้ดูแล</option>
@@ -5742,17 +6313,141 @@ function renderUserManagement(el) {
         <div class="card" style="margin-top:16px">
             <div class="card-header"><h3>เพิ่มผู้ใช้ใหม่</h3></div>
             <div style="padding:0 20px 20px">
-                <p style="color:var(--gray-500);font-size:13px;margin-bottom:8px">
-                    สร้างผู้ใช้ใหม่ที่ Supabase Dashboard &rarr; Authentication &rarr; Users &rarr; Add user
+                <div class="form-grid" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px">
+                    <div><label>ชื่อผู้ใช้ (ภาษาอังกฤษ)</label><input type="text" id="newUserName" placeholder="เช่น somchai"></div>
+                    <div><label>รหัสผ่าน (≥6 ตัว)</label><input type="text" id="newUserPass" placeholder="รหัสผ่าน"></div>
+                    <div><label>ชื่อ-สกุล</label><input type="text" id="newUserDisplay" placeholder="ชื่อจริง"></div>
+                </div>
+                <button class="btn btn-primary" onclick="createNewUser()">สร้างผู้ใช้</button>
+                <p style="color:var(--gray-500);font-size:12px;margin-top:8px">
+                    ผู้ใช้จะ login ด้วย "ชื่อผู้ใช้" + รหัสผ่าน (ไม่ต้องใช้อีเมล)
                 </p>
-                <p style="color:var(--gray-500);font-size:13px">
-                    เมื่อผู้ใช้ login ครั้งแรก ระบบจะสร้าง profile อัตโนมัติเป็น "ผู้บันทึก"
+            </div>
+        </div>`;
+
+        html += `<div class="card" style="margin-top:16px">
+            <div class="card-header"><h3>สำรองข้อมูล / กู้คืนข้อมูล</h3></div>
+            <div style="padding:0 20px 20px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+                <button class="btn btn-primary" onclick="backupAllData()">📥 Backup ข้อมูลทั้งหมด</button>
+                <button class="btn btn-outline" onclick="document.getElementById('restoreFileInput').click()">📤 Restore ข้อมูล</button>
+                <input type="file" id="restoreFileInput" accept=".json" style="display:none" onchange="restoreAllData(this)">
+                <button class="btn btn-outline" onclick="DB.forceSyncAll()">🔄 Force Sync ไป Supabase</button>
+                <p style="color:var(--gray-500);font-size:12px;margin-top:4px;width:100%">
+                    Backup จะดาวน์โหลดข้อมูลทั้งหมด (บันทึกประจำวัน, ราคาน้ำมัน, ภาษี, ลูกหนี้, การชำระเงิน, ตั้งค่า) เป็นไฟล์ JSON
                 </p>
             </div>
         </div>`;
 
         el.innerHTML = html;
     });
+}
+
+async function backupAllData() {
+    try {
+        showToast('กำลังรวบรวมข้อมูล...', 'info');
+        const backup = {
+            version: '1.0',
+            exportedAt: new Date().toISOString(),
+            exportedBy: Auth.currentUser ? Auth.currentUser.email : 'unknown',
+            dailyRecords: DB.getAllRecords(),
+            fuelPrices: DB._pricesCache || {},
+            fuelPricesUpdatedAt: DB._pricesUpdatedAt || null,
+            taxEntries: DB._taxCache || {},
+            creditPayments: DB._creditPaymentsCache || [],
+            creditSettings: DB._creditSettingsCache || {},
+        };
+        // Also try fetching from Supabase directly for completeness
+        try {
+            const tables = ['daily_records', 'fuel_prices', 'tax_entries', 'credit_payments', 'app_settings', 'custom_credit_customers', 'user_profiles'];
+            backup.supabaseTables = {};
+            for (const t of tables) {
+                const { data } = await supabaseClient.from(t).select('*');
+                backup.supabaseTables[t] = data || [];
+            }
+        } catch (e) { console.warn('Supabase fetch for backup failed:', e); }
+
+        const json = JSON.stringify(backup, null, 2);
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const now = new Date();
+        const dateStr = now.getFullYear() + '' + String(now.getMonth() + 1).padStart(2, '0') + '' + String(now.getDate()).padStart(2, '0');
+        a.href = url;
+        a.download = 'fuel-backup-' + dateStr + '.json';
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast('ดาวน์โหลด Backup สำเร็จ!', 'success');
+    } catch (e) {
+        showToast('Backup ล้มเหลว: ' + e.message, 'error');
+    }
+}
+
+async function restoreAllData(input) {
+    const file = input.files[0];
+    if (!file) return;
+    if (!confirm('⚠️ การ Restore จะเขียนทับข้อมูลปัจจุบัน\nคุณแน่ใจหรือไม่?')) { input.value = ''; return; }
+    try {
+        const text = await file.text();
+        const backup = JSON.parse(text);
+        if (!backup.version || !backup.dailyRecords) {
+            showToast('ไฟล์ backup ไม่ถูกต้อง', 'error');
+            input.value = '';
+            return;
+        }
+        // Restore to local cache
+        DB._cache = {};
+        backup.dailyRecords.forEach(r => {
+            DB._cache[r.stationId + '_' + r.date] = r;
+        });
+        if (backup.fuelPrices) DB._pricesCache = backup.fuelPrices;
+        if (backup.taxEntries) DB._taxCache = backup.taxEntries;
+        if (backup.creditPayments) DB._creditPaymentsCache = backup.creditPayments;
+        if (backup.creditSettings) DB._creditSettingsCache = backup.creditSettings;
+        // Save to localStorage
+        DB._backupRecords();
+        DB._backupPrices();
+        DB._backupTax();
+        DB._backupCreditPayments();
+        DB._backupCreditSettings();
+        showToast('Restore สำเร็จ! (' + backup.dailyRecords.length + ' records) — กำลัง sync ไป Supabase...', 'success');
+        // Sync to Supabase
+        await DB.forceSyncAll();
+        input.value = '';
+    } catch (e) {
+        showToast('Restore ล้มเหลว: ' + e.message, 'error');
+        input.value = '';
+    }
+}
+
+async function createNewUser() {
+    const uname = (document.getElementById('newUserName').value || '').trim().toLowerCase();
+    const pass = (document.getElementById('newUserPass').value || '').trim();
+    const display = (document.getElementById('newUserDisplay').value || '').trim();
+    if (!uname || !pass) { showToast('กรุณากรอกชื่อผู้ใช้และรหัสผ่าน', 'error'); return; }
+    if (pass.length < 6) { showToast('รหัสผ่านต้องมีอย่างน้อย 6 ตัว', 'error'); return; }
+    if (!/^[a-z0-9._-]+$/.test(uname)) { showToast('ชื่อผู้ใช้ใช้ได้เฉพาะ a-z 0-9 . _ -', 'error'); return; }
+    const email = uname + '@thongyoo-user.com';
+    try {
+        // Use a separate supabase client so admin's session isn't replaced
+        const tempClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+        const { data, error } = await tempClient.auth.signUp({ email, password: pass });
+        if (error) { showToast('สร้างไม่สำเร็จ: ' + error.message, 'error'); return; }
+        if (data && data.user) {
+            await supabaseClient.from('user_profiles').upsert({
+                id: data.user.id,
+                email: email,
+                display_name: display || uname,
+                role: 'entry'
+            });
+        }
+        showToast('สร้างผู้ใช้ ' + uname + ' สำเร็จ', 'success');
+        document.getElementById('newUserName').value = '';
+        document.getElementById('newUserPass').value = '';
+        document.getElementById('newUserDisplay').value = '';
+        renderUserManagement(document.getElementById('pageContent'));
+    } catch (e) {
+        showToast('เกิดข้อผิดพลาด: ' + e.message, 'error');
+    }
 }
 
 async function updateUserProfile(userId, field, value) {
@@ -5776,6 +6471,7 @@ let creditSummaryState = {
     dateTo: todayStr(),
     stationId: '',  // '' = ทุกสาขา
     customerFilter: '',  // '' = ทุกราย, or name to filter
+    refNoFilter: '',  // '' = ทุกเลขที่อ้างอิง
     fuelTypeFilter: '',  // '' = ทุกชนิด
     billHeaderStationId: '',  // '' = ไม่แสดงหัวบิล, or station id for bill header
 };
@@ -5856,6 +6552,12 @@ function renderCreditSummary(el) {
                 </datalist>
             </div>
             <div class="form-group">
+                <label>เลขที่อ้างอิง (ค้นหา)</label>
+                <input type="text" value="${st.refNoFilter}"
+                    oninput="creditSummaryState.refNoFilter=this.value"
+                    placeholder="เช่น 16/41 (ค้นหาบางส่วนได้)">
+            </div>
+            <div class="form-group">
                 <label>ชนิดน้ำมัน</label>
                 <select onchange="creditSummaryState.fuelTypeFilter=this.value">
                     <option value="" ${st.fuelTypeFilter === '' ? 'selected' : ''}>ทุกชนิด</option>
@@ -5920,9 +6622,15 @@ function generateCreditSummary() {
                 record.creditCustomers.forEach(item => {
                     const name = (item.name || '').trim();
                     if (!name) return;
-                    // Filter by customer name if specified
+                    // Filter by customer name or code if specified
                     const filterStr = (st.customerFilter || '').trim().toLowerCase();
-                    if (filterStr && !name.toLowerCase().includes(filterStr)) return;
+                    const _mlTmp = getCreditMasterList();
+                    const _cmTmp = _mlTmp.find(c => c.name === name);
+                    const custCode = _cmTmp ? (_cmTmp.code || '').toLowerCase() : '';
+                    if (filterStr && !name.toLowerCase().includes(filterStr) && !custCode.includes(filterStr)) return;
+                    // Filter by reference number (substring, case-insensitive)
+                    const refFilter = (st.refNoFilter || '').trim().toLowerCase();
+                    if (refFilter && !String(item.refNo || '').toLowerCase().includes(refFilter)) return;
                     // Filter by fuel type if specified
                     if (st.fuelTypeFilter && item.fuelType !== st.fuelTypeFilter) return;
                     const key = name.toLowerCase();
@@ -5977,6 +6685,7 @@ function generateCreditSummary() {
     window._creditCustomersData = customers;
     window._creditPeriodLabel = periodLabel;
     window._creditStationLabel = stationLabel;
+    window._creditDateFrom = st.dateFrom || '';
 
     if (customers.length === 0) {
         html += `<div style="padding:32px;text-align:center;color:var(--gray-400)">ไม่พบรายการลูกหนี้เงินเชื่อในช่วงเวลาที่เลือก</div>`;
@@ -5994,12 +6703,23 @@ function generateCreditSummary() {
                 </select>
             </label>
             <button class="btn btn-primary btn-sm" onclick="printCreditReport()">🖨️ พิมพ์ใบเรียกเก็บ</button>
+            <button class="btn btn-sm btn-outline" onclick="printBillingStatement()">🖨️ พิมพ์ใบวางบิล (LQ310)</button>
         </div>
-        <div class="table-wrapper"><table class="compare-table">
+        <div class="table-wrapper"><table class="compare-table" style="table-layout:fixed;width:100%">
+            <colgroup>
+                <col style="width:36px">
+                <col style="width:50px">
+                <col style="width:70px">
+                <col>
+                <col style="width:100px">
+                <col style="width:120px">
+                <col style="width:110px">
+            </colgroup>
             <thead>
                 <tr>
-                    <th style="width:40px"></th>
+                    <th></th>
                     <th>ลำดับ</th>
+                    <th>รหัส</th>
                     <th>ชื่อลูกหนี้</th>
                     <th class="number">ลิตรรวม</th>
                     <th class="number">ยอดรวม (บาท)</th>
@@ -6013,6 +6733,7 @@ function generateCreditSummary() {
             html += `<tr>
                 <td><input type="checkbox" class="credit-select-cb" data-idx="${i}" onchange="updateCreditSelectedCount()"></td>
                 <td>${i + 1}</td>
+                <td>${cust.code || '-'}</td>
                 <td style="cursor:pointer" onclick="toggleCreditDetail('${rowId}')"><strong>${cust.displayName}</strong></td>
                 <td class="number">${fmt(cust.totalLiters)}</td>
                 <td class="number">${fmt(cust.totalAmount)}</td>
@@ -6020,27 +6741,27 @@ function generateCreditSummary() {
             </tr>
             <tr id="${rowId}" style="display:none">
                 <td colspan="7" style="padding:0">
-                    <div style="background:var(--gray-50);padding:12px;border-radius:var(--radius)">
+                    <div style="background:var(--gray-50);padding:8px;border-radius:var(--radius)">
                         <table style="width:100%;border-collapse:collapse;font-size:13px">
                             <thead><tr style="border-bottom:1px solid var(--gray-200)">
-                                <th style="padding:6px 8px;text-align:left">วันที่</th>
-                                <th style="padding:6px 8px;text-align:left">สาขา</th>
-                                <th style="padding:6px 8px;text-align:left">เลขที่อ้างอิง</th>
-                                <th style="padding:6px 8px;text-align:left">ทะเบียนรถ</th>
-                                <th style="padding:6px 8px;text-align:left">ชนิดน้ำมัน</th>
-                                <th style="padding:6px 8px;text-align:right">ลิตร</th>
-                                <th style="padding:6px 8px;text-align:right">จำนวนเงิน</th>
+                                <th style="padding:2px 8px;text-align:left">วันที่</th>
+                                <th style="padding:2px 8px;text-align:left">สาขา</th>
+                                <th style="padding:2px 8px;text-align:left">เลขที่อ้างอิง</th>
+                                <th style="padding:2px 8px;text-align:left">ทะเบียนรถ</th>
+                                <th style="padding:2px 8px;text-align:left">ชนิดน้ำมัน</th>
+                                <th style="padding:2px 8px;text-align:right">ลิตร</th>
+                                <th style="padding:2px 8px;text-align:right">จำนวนเงิน</th>
                             </tr></thead>
                             <tbody>`;
             cust.entries.forEach(e => {
                 html += `<tr style="border-bottom:1px solid var(--gray-100)">
-                    <td style="padding:6px 8px">${formatDateThai(e.date)}</td>
-                    <td style="padding:6px 8px">${e.stationName}</td>
-                    <td style="padding:6px 8px">${e.refNo}</td>
-                    <td style="padding:6px 8px">${e.licensePlate}</td>
-                    <td style="padding:6px 8px">${e.fuelLabel}</td>
-                    <td style="padding:6px 8px;text-align:right">${fmt(e.liters)}</td>
-                    <td style="padding:6px 8px;text-align:right">${fmt(e.amount)}</td>
+                    <td style="padding:2px 8px">${formatDateThai(e.date)}</td>
+                    <td style="padding:2px 8px">${e.stationName}</td>
+                    <td style="padding:2px 8px">${e.refNo}</td>
+                    <td style="padding:2px 8px">${e.licensePlate}</td>
+                    <td style="padding:2px 8px">${e.fuelLabel}</td>
+                    <td style="padding:2px 8px;text-align:right">${fmt(e.liters)}</td>
+                    <td style="padding:2px 8px;text-align:right">${fmt(e.amount)}</td>
                 </tr>`;
             });
             html += `</tbody></table></div></td></tr>`;
@@ -6050,7 +6771,7 @@ function generateCreditSummary() {
             <tfoot>
                 <tr class="table-row-summary">
                     <td></td>
-                    <td colspan="2"><strong>รวมทั้งหมด</strong></td>
+                    <td colspan="3"><strong>รวมทั้งหมด</strong></td>
                     <td class="number"><strong>${fmt(grandLiters)}</strong></td>
                     <td class="number"><strong>${fmt(grandTotal)}</strong></td>
                     <td></td>
@@ -6117,22 +6838,24 @@ function printCreditReport() {
     let printHtml = `<html><head><meta charset="UTF-8">
         <title>ใบเรียกเก็บหนี้ - ลูกหนี้เงินเชื่อ</title>
         <style>
-            body { font-family: 'Noto Sans Thai', sans-serif; font-size: 13px; margin: 20px; color: #000; }
-            .bill-header { text-align: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #333; }
-            .bill-header .company-name { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
-            .bill-header .company-address { font-size: 13px; color: #333; margin-bottom: 2px; }
-            .bill-header .company-tax { font-size: 13px; color: #555; }
-            h2 { text-align: center; margin-bottom: 4px; }
-            .subtitle { text-align: center; color: #666; margin-bottom: 16px; font-size: 13px; }
-            table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
-            th, td { border: 1px solid #ccc; padding: 6px 8px; }
+            body { font-family: 'Noto Sans Thai', sans-serif; font-size: 12px; margin: 5mm 6mm; color: #000; }
+            .bill-header { text-align: center; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 2px solid #333; }
+            .bill-header .company-name { font-size: 18px; font-weight: 700; margin-bottom: 2px; }
+            .bill-header .company-address { font-size: 12px; color: #333; margin-bottom: 2px; }
+            .bill-header .company-tax { font-size: 12px; color: #555; }
+            h2 { text-align: center; margin: 6px 0 2px; font-size: 16px; }
+            .subtitle { text-align: center; color: #666; margin-bottom: 10px; font-size: 12px; }
+            table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+            th, td { border: 1px solid #ccc; padding: 3px 6px; font-size: 12px; white-space: nowrap; }
+            td.wrap, th.wrap { white-space: normal; }
             th { background: #f5f5f5; font-weight: 600; }
+            tr { page-break-inside: avoid; }
             .number { text-align: right; }
-            .customer-section { margin-bottom: 24px; page-break-inside: avoid; }
-            .customer-header { background: #e8e8e8; padding: 8px 12px; font-weight: 700; font-size: 14px; border: 1px solid #ccc; border-bottom: none; }
+            .customer-section { margin-bottom: 10px; }
+            .cust-title-row td { background: #e8e8e8; font-weight: 700; font-size: 13px; padding: 5px 8px; }
             .summary-row { font-weight: 700; background: #f9f9f9; }
-            .grand-total { font-size: 15px; font-weight: 700; margin-top: 12px; text-align: right; }
-            @media print { body { margin: 10mm; } }
+            .grand-total { font-size: 14px; font-weight: 700; margin-top: 8px; text-align: right; }
+            @media print { body { margin: 5mm 6mm; } @page { size: A4; margin: 5mm 6mm; } }
         </style></head><body>`;
 
     if (billStation) {
@@ -6148,12 +6871,13 @@ function printCreditReport() {
 
     selected.forEach(cust => {
         printHtml += `<div class="customer-section">
-            <div class="customer-header">${cust.displayName} — ยอดรวม ${fmt(cust.totalAmount)} บาท (${fmt(cust.totalLiters)} ลิตร)</div>
             <table>
-                <thead><tr>
+                <tbody>
+                <tr class="cust-title-row"><td colspan="7">${cust.displayName} — ยอดรวม ${fmt(cust.totalAmount)} บาท (${fmt(cust.totalLiters)} ลิตร)</td></tr>
+                <tr>
                     <th>วันที่</th><th>สาขา</th><th>เลขที่อ้างอิง</th><th>ทะเบียนรถ</th>
                     <th>ชนิดน้ำมัน</th><th class="number">ลิตร</th><th class="number">จำนวนเงิน</th>
-                </tr></thead><tbody>`;
+                </tr>`;
         cust.entries.forEach(e => {
             printHtml += `<tr>
                 <td>${formatDateThai(e.date)}</td><td>${e.stationName}</td><td>${e.refNo}</td><td>${e.licensePlate}</td>
@@ -6171,6 +6895,109 @@ function printCreditReport() {
         </body></html>`;
 
     const w = window.open('', '_blank');
+    if (!w) { showToast('Popup ถูกบล็อค กรุณาอนุญาต popup', 'error'); return; }
+    w.document.write(printHtml);
+    w.document.close();
+    w.onload = () => { w.print(); };
+}
+
+function printBillingStatement() {
+    const customers = window._creditCustomersData || [];
+    const periodLabel = window._creditPeriodLabel || '';
+    const checkedIdxs = Array.from(document.querySelectorAll('.credit-select-cb:checked')).map(cb => parseInt(cb.dataset.idx));
+
+    if (checkedIdxs.length === 0) { showToast('กรุณาเลือกลูกหนี้อย่างน้อย 1 ราย'); return; }
+
+    const selected = checkedIdxs.map(i => customers[i]).filter(Boolean);
+    const billStation = creditSummaryState.billHeaderStationId
+        ? REF.stations.find(s => s.id === creditSummaryState.billHeaderStationId) : null;
+
+    // Extract month/year from period
+    const periodMatch = periodLabel.match(/(\d+)\s*[\-\/]\s*(\d+)\s*[\-\/]\s*(\d+)/);
+    let monthYear = periodLabel;
+    if (window._creditDateFrom) {
+        const d = new Date(window._creditDateFrom);
+        const thaiMonths = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
+        monthYear = thaiMonths[d.getMonth()] + '  ' + (d.getFullYear() + 543);
+    }
+
+    let pages = '';
+    selected.forEach((cust, ci) => {
+        const billNo = (creditSummaryState.billHeaderStationId === 'ST02' ? '04' : '03') + '-' + String(ci + 1).padStart(4, '0');
+
+        let rows = '';
+        let grandTotal = 0;
+        cust.entries.forEach(e => {
+            const d = new Date(e.date);
+            const dd = d.getDate();
+            const mm = d.getMonth() + 1;
+            const yy = d.getFullYear() + 543;
+            const dateStr = dd + '/' + mm + '/' + yy;
+            grandTotal += parseNum(e.amount);
+            rows += '<tr>'
+                + '<td style="text-align:center;width:18%">' + dateStr + '</td>'
+                + '<td style="text-align:center;width:15%">' + (e.refNo || '') + '</td>'
+                + '<td style="text-align:center;width:18%">' + (e.licensePlate || '') + '</td>'
+                + '<td style="text-align:right;width:20%;padding-right:15mm">' + fmt(e.amount) + '</td>'
+                + '</tr>';
+        });
+
+        const companyName = billStation ? billStation.businessName : 'บริษัท ทองอยู่โฮลดิ้ง จำกัด';
+        const companyAddr = billStation ? billStation.address : '349 ม.5 ต.หนองครก อ.เมือง จ.ศรีสะเกษ 33000';
+        const companyPhone = billStation ? (billStation.phone || 'โทรฯ 045-612653, 611452, 081-2651233, 081-2651244 แฟ๊ก 045-611833') : 'โทรฯ 045-612653, 611452, 081-2651233, 081-2651244 แฟ๊ก 045-611833';
+
+        var totalEntries = cust.entries.length;
+
+        pages += (ci > 0 ? '<div style="page-break-before:always"></div>' : '')
+            + '<div class="bill-page">'
+            + '<table>'
+            + '<thead>'
+            + '<tr><td colspan="4" style="text-align:center;font-weight:bold;font-size:20px;padding-bottom:4px;border:none">ใบวางบิล</td></tr>'
+            + '<tr><td colspan="4" style="text-align:center;font-weight:bold;font-size:16px;padding-bottom:2px;border:none">' + companyName + '</td></tr>'
+            + '<tr><td colspan="4" style="text-align:center;font-size:11px;padding-bottom:1px;border:none">' + companyAddr + '</td></tr>'
+            + '<tr><td colspan="4" style="text-align:center;font-size:10px;padding-bottom:6px;border:none">' + companyPhone + '</td></tr>'
+            + '<tr><td colspan="4" style="text-align:right;padding-bottom:4px;border:none">เลขที่ : ' + billNo + '</td></tr>'
+            + '<tr><td colspan="4" style="padding-left:15mm;padding-bottom:2px;border:none;font-size:15px">เรียนลูกค้า : <strong style="font-size:16px">' + cust.displayName + '</strong></td></tr>'
+            + '<tr><td colspan="4" style="padding-left:15mm;padding-bottom:6px;border:none">รหัสลูกค้า: ' + (cust.code || '—') + '  (' + totalEntries + ' รายการ)</td></tr>'
+            + '<tr><td colspan="4" style="padding-left:15mm;padding-bottom:8px;border:none">ทางบริษัทฯ ขอแจ้งรายการซื้อสินค้าของท่าน  ประจำเดือน  <strong>' + monthYear + '</strong>  ดังรายละเอียดดังต่อไปนี้</td></tr>'
+            + '<tr>'
+            + '<th style="text-align:center;width:18%">วันที่</th>'
+            + '<th style="text-align:center;width:15%">เลขที่อ้างอิง</th>'
+            + '<th style="text-align:center;width:18%">ทะเบียนรถ</th>'
+            + '<th style="text-align:right;width:20%;padding-right:15mm">สุทธิ</th>'
+            + '</tr>'
+            + '</thead>'
+            + '<tbody>' + rows + '</tbody>'
+            + '</table>'
+            + '<div style="margin-top:12px;border-top:2px solid #000;padding-top:6px;page-break-inside:avoid">'
+            + '<div style="display:flex;justify-content:flex-end;margin-bottom:16px;padding-right:15mm">'
+            + '<span style="font-size:15px;font-weight:bold">รวมทั้งหมด (' + totalEntries + ' รายการ) &nbsp;&nbsp;&nbsp;&nbsp;</span>'
+            + '<span style="font-size:16px;font-weight:bold;min-width:120px;text-align:right">' + fmt(grandTotal) + ' บาท</span>'
+            + '</div>'
+            + '<div style="margin-bottom:12px">ลงชื่อ.........................................................ผู้รับวางบิล</div>'
+            + '<div style="margin-bottom:12px">รับวันที่ ......................../........................./........................</div>'
+            + '<div>นัดมารับ เงิน / เช็ค วันที่  ................../.............../.....................</div>'
+            + '</div></div>';
+    });
+
+    let printHtml = '<!DOCTYPE html><html><head><meta charset="UTF-8">'
+        + '<title>ใบวางบิล</title>'
+        + '<style>'
+        + '@page { size: 9.5in 11in; margin: 8mm 10mm; }'
+        + 'body { font-family: "Sarabun", "Noto Sans Thai", sans-serif; font-size: 12px; margin: 0; padding: 8mm 10mm; color: #000; }'
+        + '.bill-page { max-width: 100%; }'
+        + 'table { width: 100%; border-collapse: collapse; }'
+        + 'thead { display: table-header-group; }'
+        + 'th { border-bottom: 2px solid #000; padding: 3px 4px; font-size: 12px; }'
+        + 'td { padding: 2px 4px; font-size: 12px; border-bottom: none; }'
+        + 'tfoot td { border-bottom: none; border-top: 2px solid #000; padding: 4px; }'
+        + '@media print { body { padding: 0; } }'
+        + '</style></head><body>'
+        + pages
+        + '</body></html>';
+
+    const w = window.open('', '_blank');
+    if (!w) { showToast('Popup ถูกบล็อค กรุณาอนุญาต popup', 'error'); return; }
     w.document.write(printHtml);
     w.document.close();
     w.onload = () => { w.print(); };
@@ -6244,18 +7071,18 @@ function printDailyCreditAllStations() {
     if (!dateStr) { showToast('กรุณาเลือกวันที่', 'error'); return; }
 
     var allRecords = DB.getAllRecords();
-    var dayRecords = allRecords.filter(function(r) { return r.date === dateStr; });
+    var dayRecords = allRecords.filter(function (r) { return r.date === dateStr; });
 
     // Aggregate by customer: merge all stations into one total per customer
     var customerMap = {};
-    dayRecords.forEach(function(r) {
-        (r.creditCustomers || []).forEach(function(c) {
+    dayRecords.forEach(function (r) {
+        (r.creditCustomers || []).forEach(function (c) {
             var name = (c.name || '').trim();
             if (!name) return;
             var code = c.cusCode || '';
             if (!code) {
                 var ml = getCreditMasterList();
-                var cm = ml.find(function(m) { return m.name === name; });
+                var cm = ml.find(function (m) { return m.name === name; });
                 if (cm) code = cm.code;
             }
             var key = name;
@@ -6270,11 +7097,11 @@ function printDailyCreditAllStations() {
     if (customers.length === 0) { showToast('ไม่พบรายการลูกหนี้เงินเชื่อในวันที่เลือก', 'error'); return; }
 
     // Sort by customer code
-    customers.sort(function(a, b) { return (a.code).localeCompare(b.code); });
+    customers.sort(function (a, b) { return (a.code).localeCompare(b.code); });
 
     var grandTotal = 0;
     var rows = '';
-    customers.forEach(function(cust) {
+    customers.forEach(function (cust) {
         grandTotal += cust.total;
         rows += '<div class="row">'
             + '<span class="code">' + cust.code + '</span>'
@@ -6285,21 +7112,21 @@ function printDailyCreditAllStations() {
 
     var printHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>สรุปลูกหนี้เงินเชื่อรายวัน</title>'
         + '<style>'
-        + 'body{font-family:"Sarabun",sans-serif;margin:0;padding:20px 30px;color:#333}'
-        + '#content{transform-origin:top left}'
+        + 'body{font-family:"Sarabun",sans-serif;margin:0;padding:0;color:#333;background:#f0f0f0}'
+        + '#content{max-width:700px;margin:0 auto;padding:30px 40px;background:#fff;min-height:100vh;box-shadow:0 0 10px rgba(0,0,0,0.1);transform-origin:top left}'
         + '.report-header{text-align:center;margin-bottom:16px}'
         + '.report-header h2{margin:0;font-size:20px;font-weight:bold}'
         + '.report-header .sub-title{font-size:16px;margin-top:2px}'
         + '.report-header .date{font-size:16px;font-weight:bold;margin-top:4px}'
         + '.row{display:flex;align-items:baseline;padding:3px 0;border-bottom:1px dotted #ccc;font-size:13px}'
-        + '.row .code{width:80px;flex-shrink:0}'
+        + '.row .code{width:70px;flex-shrink:0}'
         + '.row .name{flex:1}'
-        + '.row .amt{text-align:right;font-weight:bold;white-space:nowrap;padding-right:40px}'
+        + '.row .amt{text-align:right;font-weight:bold;white-space:nowrap}'
         + '.total-line{display:flex;align-items:baseline;padding:8px 0 0;margin-top:6px;border-top:2px solid #333;font-size:14px;font-weight:bold}'
         + '.total-line .label{flex:1;text-align:right}'
-        + '.total-line .amt{text-align:right;white-space:nowrap;padding-right:40px}'
+        + '.total-line .amt{text-align:right;white-space:nowrap}'
         + '.total-line .oval{display:inline-block;border:2px solid #c00;border-radius:50%;padding:2px 20px}'
-        + '@media print{body{padding:15px 25px}@page{size:A4;margin:8mm}}'
+        + '@media print{body{background:#fff;padding:0}#content{max-width:none;box-shadow:none;padding:15px 25px;margin:0}@page{size:A4;margin:8mm}}'
         + '</style>'
         + '<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;700&display=swap" rel="stylesheet">'
         + '</head><body><div id="content">'
@@ -6329,6 +7156,7 @@ function printDailyCreditAllStations() {
         + '</body></html>';
 
     var printWin = window.open('', '_blank');
+    if (!printWin) { showToast('Popup ถูกบล็อค กรุณาอนุญาต popup', 'error'); return; }
     printWin.document.write(printHtml);
     printWin.document.close();
 }
@@ -6395,7 +7223,7 @@ function renderCreditManagement() {
     const pageItems = withOutstanding.slice(curPage * PER_PAGE, (curPage + 1) * PER_PAGE);
 
     let rowsHtml = '';
-    pageItems.forEach(function(c) {
+    pageItems.forEach(function (c) {
         let status = '<span style="color:#10b981">ปกติ</span>';
         if (c.isOverdue) status = '<span style="background:#ef4444;color:white;padding:2px 8px;border-radius:4px;font-size:11px">ค้างเกินกำหนด</span>';
         else if (c.isOverLimit) status = '<span style="background:#f59e0b;color:white;padding:2px 8px;border-radius:4px;font-size:11px">เกินวงเงิน</span>';
@@ -6440,9 +7268,9 @@ function renderCreditManagement() {
         + '<thead><tr><th>รหัส</th><th>ชื่อลูกหนี้</th><th class="number">ยอดเครดิตรวม</th><th class="number">ชำระแล้ว</th><th class="number">ค้างชำระ</th><th class="number">วงเงิน</th><th>สถานะ</th><th></th></tr></thead>'
         + '<tbody>' + rowsHtml
         + '<tr class="drill-total-row"><td colspan="2"><strong>รวมทั้งหมด</strong></td>'
-        + '<td class="number"><strong>' + fmt(withOutstanding.reduce(function(s,c){return s+c.totalCredit},0)) + '</strong></td>'
-        + '<td class="number"><strong>' + fmt(withOutstanding.reduce(function(s,c){return s+c.totalPaid},0)) + '</strong></td>'
-        + '<td class="number"><strong>' + fmt(withOutstanding.reduce(function(s,c){return s+c.outstanding},0)) + '</strong></td>'
+        + '<td class="number"><strong>' + fmt(withOutstanding.reduce(function (s, c) { return s + c.totalCredit }, 0)) + '</strong></td>'
+        + '<td class="number"><strong>' + fmt(withOutstanding.reduce(function (s, c) { return s + c.totalPaid }, 0)) + '</strong></td>'
+        + '<td class="number"><strong>' + fmt(withOutstanding.reduce(function (s, c) { return s + c.outstanding }, 0)) + '</strong></td>'
         + '<td colspan="3"></td></tr>'
         + '</tbody></table></div>'
         + paginationHtml
@@ -6513,9 +7341,9 @@ function showCustomerCreditDetail(customerName) {
         + '<tbody>';
 
     let grandTotal = 0;
-    Object.keys(byDate).sort().forEach(function(date) {
+    Object.keys(byDate).sort().forEach(function (date) {
         const dayEntries = byDate[date];
-        dayEntries.forEach(function(e) {
+        dayEntries.forEach(function (e) {
             grandTotal += e.amount;
             entriesHtml += '<tr>'
                 + '<td>' + formatDateThai(e.date) + '</td>'
@@ -6528,7 +7356,7 @@ function showCustomerCreditDetail(customerName) {
         });
         // Day subtotal if multiple entries
         if (dayEntries.length > 1) {
-            var daySum = dayEntries.reduce(function(s, e) { return s + e.amount; }, 0);
+            var daySum = dayEntries.reduce(function (s, e) { return s + e.amount; }, 0);
             entriesHtml += '<tr style="background:var(--primary-50);font-weight:600">'
                 + '<td colspan="4" style="text-align:right">รวมวันที่ ' + formatDateThai(date) + '</td>'
                 + '<td class="number">' + fmt(daySum) + '</td>'
@@ -6548,7 +7376,7 @@ function showCustomerCreditDetail(customerName) {
             + '<div class="table-wrapper"><table>'
             + '<thead><tr><th>วันที่</th><th>ช่องทาง</th><th>ประเภท</th><th class="number">จำนวนเงิน</th><th>หมายเหตุ</th></tr></thead>'
             + '<tbody>';
-        payments.forEach(function(p) {
+        payments.forEach(function (p) {
             paymentsHtml += '<tr>'
                 + '<td>' + formatDateThai(p.paymentDate) + '</td>'
                 + '<td>' + (methodLabels[p.paymentMethod] || p.paymentMethod || '-') + '</td>'
@@ -6557,7 +7385,7 @@ function showCustomerCreditDetail(customerName) {
                 + '<td>' + (p.note || '-') + '</td>'
                 + '</tr>';
         });
-        var totalPayments = payments.reduce(function(s, p) { return s + parseNum(p.amount); }, 0);
+        var totalPayments = payments.reduce(function (s, p) { return s + parseNum(p.amount); }, 0);
         paymentsHtml += '<tr class="drill-total-row"><td colspan="3"><strong>รวมชำระ</strong></td>'
             + '<td class="number"><strong>' + fmt(totalPayments) + '</strong></td><td></td></tr>'
             + '</tbody></table></div></div>';
@@ -6674,13 +7502,13 @@ function showPaymentForm(customerName) {
     requestAnimationFrame(() => modal.classList.add('active'));
 
     // Auto-fill code when name changes + update outstanding
-    document.getElementById('pmtCustomerName').addEventListener('change', function() {
+    document.getElementById('pmtCustomerName').addEventListener('change', function () {
         const m = masterList.find(c => c.name === this.value);
         if (m) document.getElementById('pmtCustomerCode').value = m.code;
         pmtUpdateOutstanding(this.value);
     });
     // Auto-fill name when code changes + update outstanding
-    document.getElementById('pmtCustomerCode').addEventListener('change', function() {
+    document.getElementById('pmtCustomerCode').addEventListener('change', function () {
         const m = masterList.find(c => c.code === this.value);
         if (m) {
             document.getElementById('pmtCustomerName').value = m.name;
@@ -6846,7 +7674,7 @@ function showPaymentHistory(customerName) {
             : '<div class="table-wrapper"><table>'
             + '<thead><tr><th>วันที่</th><th>ช่องทาง</th><th>ประเภท</th><th class="number">จำนวนเงิน</th><th class="number">ยอดคงค้าง</th><th>หลักฐาน</th><th>หมายเหตุ</th>' + (Auth.isAdmin() ? '<th></th>' : '') + '</tr></thead>'
             + '<tbody>'
-            + displayRows.map(function(p) {
+            + displayRows.map(function (p) {
                 var escapedName = customerName.replace(/'/g, "\\'");
                 return '<tr>'
                     + '<td>' + formatDateThai(p.paymentDate) + '</td>'
@@ -6943,25 +7771,25 @@ function renderTaxReports(el) {
                 <div class="form-group">
                     <label>ประเภทรายงาน</label>
                     <select id="reportType" onchange="onReportTypeChange(this.value)">
-                        <option value="A" ${st.type==='A'?'selected':''}>ส่วน ก - มิเตอร์หัวจ่าย (รายวัน)</option>
-                        <option value="A-monthly" ${st.type==='A-monthly'?'selected':''}>ส่วน ก - สรุปรายเดือน</option>
-                        <option value="B" ${st.type==='B'?'selected':''}>ส่วน ข - สต็อกก้นถัง (รายวัน)</option>
-                        <option value="C" ${st.type==='C'?'selected':''}>ส่วน ค - สรุปยอดน้ำมัน (รายเดือน)</option>
+                        <option value="A" ${st.type === 'A' ? 'selected' : ''}>ส่วน ก - มิเตอร์หัวจ่าย (รายวัน)</option>
+                        <option value="A-monthly" ${st.type === 'A-monthly' ? 'selected' : ''}>ส่วน ก - สรุปรายเดือน</option>
+                        <option value="B" ${st.type === 'B' ? 'selected' : ''}>ส่วน ข - สต็อกก้นถัง (รายวัน)</option>
+                        <option value="C" ${st.type === 'C' ? 'selected' : ''}>ส่วน ค - สรุปยอดน้ำมัน (รายเดือน)</option>
                     </select>
                 </div>
                 <div class="form-group">
                     <label>สถานี</label>
-                    <select id="reportStation" onchange="taxReportState.stationId=this.value;loadTaxEntryForReport();renderTaxEntryForm();loadDeliveryDocsForReport();renderDeliveryDocsForm()">
+                    <select id="reportStation" onchange="taxReportState.stationId=this.value;loadTaxEntryForReport();renderTaxEntryForm();loadDeliveryDocsForReport();renderDeliveryDocsForm();generateTaxReport()">
                         <option value="">-- เลือกสถานี --</option>
-                        ${REF.stations.map(s => `<option value="${s.id}" ${s.id===st.stationId?'selected':''}>${s.name}</option>`).join('')}
+                        ${REF.stations.map(s => `<option value="${s.id}" ${s.id === st.stationId ? 'selected' : ''}>${s.name}</option>`).join('')}
                     </select>
                 </div>
                 <div class="form-group" id="reportDateGroup">
-                    <label>${(st.type==='C' || st.type==='A-monthly')?'เดือน':'วันที่'}</label>
-                    ${(st.type==='C' || st.type==='A-monthly')
-                        ? `<input type="month" id="reportMonth" value="${st.month}" onchange="taxReportState.month=this.value">`
-                        : `<input type="date" id="reportDate" value="${st.date}" onchange="taxReportState.date=this.value;loadTaxEntryForReport();renderTaxEntryForm();loadDeliveryDocsForReport();renderDeliveryDocsForm()">`
-                    }
+                    <label>${(st.type === 'C' || st.type === 'A-monthly') ? 'เดือน' : 'วันที่'}</label>
+                    ${(st.type === 'C' || st.type === 'A-monthly')
+            ? `<input type="month" id="reportMonth" value="${st.month}" onchange="taxReportState.month=this.value;generateTaxReport()">`
+            : `<input type="date" id="reportDate" value="${st.date}" onchange="taxReportState.date=this.value;loadTaxEntryForReport();renderTaxEntryForm();loadDeliveryDocsForReport();renderDeliveryDocsForm();generateTaxReport()">`
+        }
                 </div>
             </div>
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
@@ -6982,6 +7810,10 @@ function renderTaxReports(el) {
     if (st.type === 'B' && st.stationId) {
         loadDeliveryDocsForReport();
         renderDeliveryDocsForm();
+    }
+    // Auto-generate report if station is already selected
+    if (st.stationId) {
+        generateTaxReport();
     }
 }
 
@@ -7014,13 +7846,12 @@ function doPrintOverlay(pagesHtml) {
         + '.vat-detail-row strong{min-width:80px;text-align:right;font-variant-numeric:tabular-nums}'
         + '.tax-report-bottom-section{display:flex;gap:10px;margin-top:8px;align-items:flex-start}'
         + '.tax-report-invoices{flex:1;min-width:0}'
-        + '.invoice-section-title{font-size:10px;font-weight:600;margin:6px 0 2px}'
-        + '.invoice-detail-table{width:100%;border-collapse:collapse;font-size:10px}'
-        + '.invoice-detail-table td{padding:2px 4px;border:1px solid #999;white-space:nowrap}'
-        + '.invoice-detail-table td.inv-val{min-width:30px;text-align:center;font-weight:600}'
-        + '.tax-report-prices{flex-shrink:0;width:160px;padding:6px 8px;background:#f5f5f5;border-radius:4px;border:1px solid #ccc}'
-        + '.tax-report-prices h4{font-size:11px;font-weight:600;margin:0 0 4px}'
-        + '.tax-report-prices p{font-size:10px;margin:2px 0;display:flex;justify-content:space-between;gap:4px}'
+        + '.invoice-section-title{font-size:11px;font-weight:600;margin:4px 0 1px}'
+        + '.inv-row{font-size:10px;padding:1px 0;white-space:nowrap}'
+        + '.inv-row strong{font-weight:700}'
+        + '.tax-report-prices{flex-shrink:0;width:220px;padding:10px 14px;background:#f5f5f5;border-radius:4px;border:1px solid #ccc}'
+        + '.tax-report-prices h4{font-size:16px;font-weight:700;margin:0 0 8px}'
+        + '.tax-report-prices p{font-size:15px;margin:4px 0;display:flex;justify-content:space-between;gap:4px}'
         + '.tax-report-prices .price-label{font-weight:600}'
         + '.tax-report-prices .price-value{text-align:right}'
         + '.report-b-table td:first-child,.report-b-table th:first-child{text-align:left;white-space:normal}'
@@ -7046,6 +7877,7 @@ function doPrintOverlay(pagesHtml) {
         + '</body></html>';
 
     var printWin = window.open('', '_blank');
+    if (!printWin) { showToast('Popup ถูกบล็อค กรุณาอนุญาต popup', 'error'); return; }
     printWin.document.write(printHtml);
     printWin.document.close();
 }
@@ -7082,6 +7914,20 @@ function generateTaxReport() {
     const { type, stationId, date, month } = taxReportState;
     if (!stationId) { showToast('กรุณาเลือกสถานี', 'error'); return; }
     const outEl = document.getElementById('reportOutput');
+    // Debug: log what data is available
+    if (type === 'A') {
+        const debugRec = DB.getDailyRecord(stationId, date);
+        console.log('[Tax Report Debug] stationId:', stationId, 'date:', date);
+        console.log('[Tax Report Debug] record found:', !!debugRec);
+        if (debugRec) {
+            console.log('[Tax Report Debug] meterReadings keys:', Object.keys(debugRec.meterReadings || {}));
+            console.log('[Tax Report Debug] meterReadings:', debugRec.meterReadings);
+        } else {
+            // Check what keys exist in cache for this station
+            var cacheKeys = Object.keys(DB._cache).filter(k => k.startsWith(stationId));
+            console.log('[Tax Report Debug] cache keys for station:', cacheKeys);
+        }
+    }
     if (type === 'A') outEl.innerHTML = generateReportA(stationId, date);
     else if (type === 'A-monthly') outEl.innerHTML = generateReportAMonthly(stationId, month);
     else if (type === 'B') outEl.innerHTML = generateReportB(stationId, date);
@@ -7429,14 +8275,14 @@ function getStockByFuelType(record, stationId) {
 // Helper: Thai date format
 function fmtThaiDate(dateStr) {
     const d = new Date(dateStr);
-    const months = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+    const months = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
     return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear() + 543}`;
 }
 
 function fmtThaiMonth(yearMonth) {
     const [y, m] = yearMonth.split('-');
-    const months = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
-    return `${months[parseInt(m)-1]} ${parseInt(y) + 543}`;
+    const months = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+    return `${months[parseInt(m) - 1]} ${parseInt(y) + 543}`;
 }
 
 function reportHeader(section, dateLabel, stationId) {
@@ -7510,7 +8356,7 @@ function generateReportA(stationId, date, printOpts) {
 
     // === Header ===
     const d = new Date(date);
-    const thaiMonthsShort = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+    const thaiMonthsShort = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
     const thaiYear = d.getFullYear() + 543;
     const bName = station?.businessName || BUSINESS_INFO.name;
     const taxId = station?.taxId || BUSINESS_INFO.taxId;
@@ -7578,9 +8424,9 @@ function generateReportA(stationId, date, printOpts) {
         });
         html += `</tr>`;
     }
-    // === Calculate totals per tank group ===
+    // === Calculate totals per tank group (ALL tanks for grand total accuracy) ===
     const tankTotals = {};
-    tankGroups.forEach(tg => {
+    allTankGroups.forEach(tg => {
         let totalLiters = 0;
         tg.meters.forEach(m => {
             const r = record?.meterReadings?.[m.id];
@@ -7710,7 +8556,7 @@ function generateReportA(stationId, date, printOpts) {
     // Show VAT totals + bottom section only on page 2 or normal view (not page 1)
     const showBottom = !printOpts || printOpts.page === 2;
     if (showBottom) {
-    html += `<div class="tax-report-vat-totals">
+        html += `<div class="tax-report-vat-totals">
         <div class="vat-detail-row"><span>รวมยอดขายจากน้ำมันเชื้อเพลิงทั้งสิ้น</span><strong>${fmtDec(grandTotalSales, 2)}</strong><span>บาท</span></div>
         <div class="vat-detail-row"><span>ภาษีมูลค่าเพิ่ม (7/107)</span><strong>${fmtDec(grandTotalVat, 2)}</strong><span>บาท</span></div>
         <div class="vat-detail-row"><span>ยอดขายหลังหักภาษีมูลค่าเพิ่ม</span><strong>${fmtDec(grandTotalExVat, 2)}</strong><span>บาท</span></div>
@@ -7720,66 +8566,51 @@ function generateReportA(stationId, date, printOpts) {
 
     // === Invoice Section + Fuel Prices (only page 2 or normal) ===
     if (showBottom) {
-    const inv = record?.taxInvoices || { abbreviated: [], full: [] };
+        const rawInv = record?.taxInvoices || {};
+        const inv = { abbreviated: Array.isArray(rawInv.abbreviated) ? rawInv.abbreviated : [], full: Array.isArray(rawInv.full) ? rawInv.full : [] };
 
-    html += `<div class="tax-report-bottom-section">`;
-    html += `<div class="tax-report-invoices">`;
+        html += `<div class="tax-report-bottom-section">`;
+        html += `<div class="tax-report-invoices">`;
 
-    // Abbreviated invoices (มาตรา 86/6) — 2 fixed rows
-    html += `<p class="invoice-section-title">ใบกำกับภาษีอย่างย่อ ตามมาตรา 86/6 แห่งประมวลรัษฎากร (จากการขายน้ำมันเชื้อเพลิงผ่านมิเตอร์หัวจ่าย)</p>`;
-    html += `<table class="invoice-detail-table">`;
-    for (let r = 0; r < 2; r++) {
-        const iv = inv.abbreviated[r];
-        const bookNo = iv?.bookNo || '';
-        const invoiceNo = iv?.invoiceNo || '';
-        const copies = iv?.copies || '';
-        const amount = iv ? parseNum(iv.amount) : 0;
-        const vat = amount > 0 ? Math.round((amount / 1.07 * 0.07) * 100) / 100 : 0;
-        html += `<tr>
-            <td>เล่มที่</td><td class="inv-val">${bookNo}</td>
-            <td>เลขที่</td><td class="inv-val">${invoiceNo}</td>
-            <td>จำนวน</td><td class="inv-val">${copies}</td>
-            <td>ฉบับ</td>
-            <td>จำนวน</td><td class="inv-val">${amount > 0 ? fmtDec(amount, 2) : ''}</td>
-            <td>บาท</td>
-            <td>ภาษีมูลค่าเพิ่ม</td><td class="inv-val">${fmtDec(vat, 2)}</td><td>บาท</td>
-        </tr>`;
-    }
-    html += `</table>`;
+        // Abbreviated invoices (มาตรา 86/6) — show ALL items
+        html += `<div class="invoice-section-title">ใบกำกับภาษีอย่างย่อ ตามมาตรา 86/6 (จากการขายน้ำมันผ่านมิเตอร์หัวจ่าย)</div>`;
+        if (inv.abbreviated.length === 0) {
+            html += `<div class="inv-row" style="color:#999">— ไม่มีรายการ —</div>`;
+        }
+        inv.abbreviated.forEach(function(iv) {
+            const bookNo = iv?.bookNo || '';
+            const invoiceNo = iv?.invoiceNo || '';
+            const copies = iv?.copies || '';
+            const amount = iv ? parseNum(iv.amount) : 0;
+            const vat = amount > 0 ? Math.round((amount / 1.07 * 0.07) * 100) / 100 : 0;
+            html += `<div class="inv-row">เล่มที่ <strong>${bookNo}</strong> เลขที่ <strong>${invoiceNo}</strong> จำนวน <strong>${copies}</strong> ฉบับ จำนวน <strong>${amount > 0 ? fmtDec(amount, 2) : '-'}</strong> บาท ภาษี <strong>${fmtDec(vat, 2)}</strong> บาท</div>`;
+        });
 
-    // Full invoices (มาตรา 86/4) — 4 fixed rows
-    html += `<p class="invoice-section-title">ใบกำกับภาษีเต็มรูปแบบ ตามมาตรา 86/4 แห่งประมวลรัษฎากร (จากการขายน้ำมันเชื้อเพลิงผ่านมิเตอร์หัวจ่าย)</p>`;
-    html += `<table class="invoice-detail-table">`;
-    for (let r = 0; r < 4; r++) {
-        const iv = inv.full[r];
-        const bookNo = iv?.bookNo || '';
-        const invoiceNo = iv?.invoiceNo || '';
-        const copies = iv?.copies || '';
-        const amount = iv ? parseNum(iv.amount) : 0;
-        const vat = amount > 0 ? Math.round((amount / 1.07 * 0.07) * 100) / 100 : 0;
-        html += `<tr>
-            <td>เล่มที่</td><td class="inv-val">${bookNo}</td>
-            <td>เลขที่</td><td class="inv-val">${invoiceNo}</td>
-            <td>จำนวน</td><td class="inv-val">${copies}</td>
-            <td>ฉบับ</td>
-            <td>จำนวน</td><td class="inv-val">${amount > 0 ? fmtDec(amount, 2) : ''}</td>
-            <td>บาท</td>
-            <td>ภาษีมูลค่าเพิ่ม</td><td class="inv-val">${fmtDec(vat, 2)}</td><td>บาท</td>
-        </tr>`;
-    }
-    html += `</table>`;
-    html += `</div>`;
+        // Full invoices (มาตรา 86/4) — show ALL items
+        html += `<div class="invoice-section-title">ใบกำกับภาษีเต็มรูปแบบ ตามมาตรา 86/4 (จากการขายน้ำมันผ่านมิเตอร์หัวจ่าย)</div>`;
+        if (inv.full.length === 0) {
+            html += `<div class="inv-row" style="color:#999">— ไม่มีรายการ —</div>`;
+        }
+        inv.full.forEach(function(iv) {
+            const bookNo = iv?.bookNo || '';
+            const invoiceNo = iv?.invoiceNo || '';
+            const copies = iv?.copies || '';
+            const amount = iv ? parseNum(iv.amount) : 0;
+            const vat = amount > 0 ? Math.round((amount / 1.07 * 0.07) * 100) / 100 : 0;
+            html += `<div class="inv-row">เล่มที่ <strong>${bookNo}</strong> เลขที่ <strong>${invoiceNo}</strong> จำนวน <strong>${copies}</strong> ฉบับ จำนวน <strong>${amount > 0 ? fmtDec(amount, 2) : '-'}</strong> บาท ภาษี <strong>${fmtDec(vat, 2)}</strong> บาท</div>`;
+        });
+        html += `</div>`;
 
-    // Fuel prices box (right side)
-    const fuelTypes = getStationFuelTypes(stationId);
-    html += `<div class="tax-report-prices"><h4>ราคาน้ำมันวันนี้</h4>`;
-    fuelTypes.forEach(ft => {
-        const label = PRICE_SHORT_LABELS[ft] || ft;
-        html += `<p><span class="price-label">${label}</span> <span class="price-value">${prices[ft] ? fmtDec(prices[ft], 2) : '-'}</span> บาท</p>`;
-    });
-    html += `</div>`;
+        // Fuel prices box (right side)
+        const fuelTypes = getStationFuelTypes(stationId);
+        html += `<div class="tax-report-prices"><h4>ราคาน้ำมันวันนี้</h4>`;
+        fuelTypes.forEach(ft => {
+            const label = PRICE_SHORT_LABELS[ft] || ft;
+            html += `<p><span class="price-label">${label}</span> <span class="price-value">${prices[ft] ? fmtDec(prices[ft], 2) : '-'}</span> บาท</p>`;
+        });
+        html += `</div>`;
 
-    html += `</div></div>`;
+        html += `</div></div>`;
     } // end showBottom
 
     html += `</div>`;
@@ -7874,7 +8705,7 @@ function generateReportAMonthly(stationId, yearMonth, printOpts) {
     }
 
     // === Header ===
-    const thaiMonthsFull = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
+    const thaiMonthsFull = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
     const thaiYear = year + 543;
     const bName = station?.businessName || BUSINESS_INFO.name;
     const taxId = station?.taxId || BUSINESS_INFO.taxId;
@@ -8173,7 +9004,7 @@ function generateReportB(stationId, date) {
         deliveryDocs.forEach((doc, idx) => {
             const d = doc.docDate ? new Date(doc.docDate) : null;
             const dayStr = d ? d.getDate() : '___';
-            const monthNames = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+            const monthNames = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
             const monthStr = d ? monthNames[d.getMonth()] : '___';
             const yearStr = d ? d.getFullYear() + 543 : '___';
             html += `<div style="margin-bottom:8px;padding:6px 0;${idx > 0 ? 'border-top:1px dashed var(--gray-300);' : ''}">
