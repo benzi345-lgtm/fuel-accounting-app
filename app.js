@@ -1117,17 +1117,61 @@ const DB = {
     getAllRecords() {
         return Object.values(this._cache).sort((a, b) => b.date.localeCompare(a.date));
     },
-    // Diagnostic: force sync all localStorage records to Supabase
+    // Diagnostic: force sync all localStorage records to Supabase.
+    // Robustness added after field reports of "RLS: new row violates" errors
+    // from stale/expired JWTs: we now refresh the session up-front, retry
+    // RLS failures once after another refresh, and bail out loudly when the
+    // user is clearly signed out rather than silently logging errors.
     async forceSyncAll() {
         const records = Object.values(this._cache);
         if (records.length === 0) { showToast('ไม่มีข้อมูลใน cache', 'error'); return; }
+
+        // Step 1: ensure we have a live session before sending N requests
+        let sessionOk = false;
+        try {
+            let { data: { session } } = await supabaseClient.auth.getSession();
+            if (!session) {
+                const { data: refreshed } = await supabaseClient.auth.refreshSession();
+                session = refreshed && refreshed.session;
+            } else {
+                // Pre-emptively refresh if token expires within 5 minutes
+                const expAt = (session && session.expires_at) ? session.expires_at * 1000 : 0;
+                if (expAt && expAt - Date.now() < 5 * 60 * 1000) {
+                    const { data: refreshed } = await supabaseClient.auth.refreshSession();
+                    if (refreshed && refreshed.session) session = refreshed.session;
+                }
+            }
+            sessionOk = !!session;
+        } catch (e) { sessionOk = false; }
+
+        if (!sessionOk) {
+            showToast('Session หมดอายุ — กรุณา Logout แล้ว Login ใหม่ ก่อนกด Force Sync', 'error');
+            return;
+        }
+
         let ok = 0, fail = 0, errors = [];
         showToast('กำลัง sync ' + records.length + ' records...', 'info');
+
+        const self = this;
+        async function upsertOnce(rec) {
+            const dbData = self._toDb(rec);
+            return await supabaseClient.from('daily_records')
+                .upsert(dbData, { onConflict: 'station_id,record_date' });
+        }
+
         for (const rec of records) {
             try {
-                const dbData = this._toDb(rec);
-                const { error } = await supabaseClient.from('daily_records')
-                    .upsert(dbData, { onConflict: 'station_id,record_date' });
+                let { error } = await upsertOnce(rec);
+                // Retry once on RLS error after another session refresh — some
+                // clients desync their JWT between the first request and the loop.
+                if (error && error.message && (error.message.includes('row-level security')
+                    || error.message.includes('JWT') || error.code === 'PGRST301')) {
+                    try {
+                        await supabaseClient.auth.refreshSession();
+                        const retry = await upsertOnce(rec);
+                        error = retry.error;
+                    } catch (e) { /* keep original error */ }
+                }
                 if (error) {
                     fail++;
                     errors.push({ stationId: rec.stationId, date: rec.date, message: error.message, code: error.code, details: error.details, hint: error.hint });
