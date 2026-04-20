@@ -1265,6 +1265,10 @@ const DB = {
             return !localHasReal;
         }
 
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        let consecutiveNetworkFails = 0;
+        let aborted = false;
+
         for (const rec of records) {
             // Safety gate — skip push that would cause data loss
             if (wouldWipeServerMeters(rec)) {
@@ -1272,29 +1276,65 @@ const DB = {
                 console.warn('[forceSyncAll] SKIPPED (would wipe server meters):', rec.stationId, rec.date);
                 continue;
             }
-            try {
-                let { error } = await upsertOnce(rec);
-                // Retry once on RLS error after another session refresh — some
-                // clients desync their JWT between the first request and the loop.
-                if (error && error.message && (error.message.includes('row-level security')
-                    || error.message.includes('JWT') || error.code === 'PGRST301')) {
-                    try {
-                        await supabaseClient.auth.refreshSession();
-                        const retry = await upsertOnce(rec);
-                        error = retry.error;
-                    } catch (e) { /* keep original error */ }
+
+            // Network-failure retry loop (up to 3 attempts with backoff).
+            // "TypeError: Failed to fetch" means the request never reached
+            // Supabase — usually transient (WiFi blip, proxy, throttling).
+            let error = null;
+            let networkError = false;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    const res = await upsertOnce(rec);
+                    error = res.error;
+                    networkError = false;
+                    // RLS retry: refresh session once and try again
+                    if (error && error.message && (error.message.includes('row-level security')
+                        || error.message.includes('JWT') || error.code === 'PGRST301')) {
+                        try {
+                            await supabaseClient.auth.refreshSession();
+                            const retry = await upsertOnce(rec);
+                            error = retry.error;
+                        } catch (e) { /* keep original error */ }
+                    }
+                    break; // got a response (ok or supabase error) — stop retrying
+                } catch (e) {
+                    // Network-level failure (TypeError: Failed to fetch, etc.)
+                    error = e;
+                    networkError = true;
+                    if (attempt < 2) await sleep(1000 * (attempt + 1)); // 1s, 2s
                 }
-                if (error) {
-                    fail++;
-                    errors.push({ stationId: rec.stationId, date: rec.date, message: error.message, code: error.code, details: error.details, hint: error.hint });
-                } else ok++;
-            } catch (e) {
+            }
+
+            if (error) {
                 fail++;
-                errors.push({ stationId: rec.stationId, date: rec.date, message: e.message });
+                errors.push({
+                    stationId: rec.stationId, date: rec.date,
+                    message: error.message,
+                    code: error.code, details: error.details, hint: error.hint
+                });
+                if (networkError) {
+                    consecutiveNetworkFails++;
+                    // Bail early if Supabase is clearly unreachable — no point
+                    // hammering 700 records when network is down.
+                    if (consecutiveNetworkFails >= 5) {
+                        aborted = true;
+                        console.error('[forceSyncAll] Aborted after 5 consecutive network failures — Supabase unreachable.');
+                        break;
+                    }
+                } else {
+                    consecutiveNetworkFails = 0;
+                }
+            } else {
+                ok++;
+                consecutiveNetworkFails = 0;
             }
         }
         if (syncBtn) syncBtn.classList.remove('syncing');
-        if (fail > 0) {
+        if (aborted) {
+            console.error('Sync aborted — network errors:', errors);
+            showToast('Sync หยุดทำงาน: ไม่สามารถติดต่อ Supabase ได้ (ตรวจสอบ internet หรือสถานะ Supabase project)', 'error');
+            showSyncErrorsModal(ok, fail, errors);
+        } else if (fail > 0) {
             console.error('Sync errors:', errors);
             showSyncErrorsModal(ok, fail, errors);
         } else if (skipped > 0) {
