@@ -633,6 +633,118 @@ const DB = {
         return obj;
     },
 
+    // Safe merge before upsert: preserves server values when local is empty.
+    // Used by forceSyncAll to prevent "empty meter overwrites real meter" bug.
+    //
+    // Rules per field type:
+    //   objectFields  (meterReadings, stockEntries, ...): per-key compare;
+    //                 if local value is empty-ish but server has real data,
+    //                 keep server. Otherwise local wins.
+    //   arrayFields   (expenses, creditCustomers, ...):  union by id — never
+    //                 drop items.
+    //   finance:      local wins per-field, but only when local value is
+    //                 non-empty. Otherwise keep server.
+    //   taxInvoices:  local if defined, else server.
+    _mergeForUpsert(local, serverRow) {
+        if (!serverRow) return local;
+        const serverRec = this._fromDb(serverRow);
+        const objectFields = ['meterReadings', 'stockEntries', 'productStockEntries', 'fuelPrices'];
+        const arrayFields = ['productSales', 'expenses', 'creditCardEntries',
+            'bluecardEntries', 'creditCustomers', 'internalUsage'];
+        const merged = JSON.parse(JSON.stringify(local));
+
+        // Object fields: key-by-key — server wins when local value is "empty-ish"
+        objectFields.forEach(function (f) {
+            const L = merged[f] || {}, S = serverRec[f] || {};
+            const out = {};
+            // Seed with ALL server keys so nothing server has gets dropped
+            Object.keys(S).forEach(function (k) { out[k] = S[k]; });
+            Object.keys(L).forEach(function (k) {
+                const lv = L[k];
+                const sv = S[k];
+                if (lv && typeof lv === 'object' && !Array.isArray(lv)) {
+                    // Sub-object like { start, end } — keep local only if it has real values
+                    const localHasVals = Object.keys(lv).some(function (x) {
+                        const v = lv[x];
+                        return v !== '' && v !== null && v !== undefined;
+                    });
+                    const serverHasVals = sv && typeof sv === 'object' && Object.keys(sv).some(function (x) {
+                        const v = sv[x];
+                        return v !== '' && v !== null && v !== undefined;
+                    });
+                    if (localHasVals) {
+                        // Local has real data — but merge per-subfield so
+                        // server's non-empty subfield isn't wiped by local's empty one
+                        const subOut = {};
+                        const subKeys = {};
+                        Object.keys(lv).forEach(function (x) { subKeys[x] = 1; });
+                        if (sv && typeof sv === 'object') Object.keys(sv).forEach(function (x) { subKeys[x] = 1; });
+                        Object.keys(subKeys).forEach(function (x) {
+                            const lx = lv[x];
+                            const sx = sv ? sv[x] : undefined;
+                            const lHas = lx !== '' && lx !== null && lx !== undefined;
+                            const sHas = sx !== '' && sx !== null && sx !== undefined;
+                            if (lHas) subOut[x] = lx;
+                            else if (sHas) subOut[x] = sx;
+                            else subOut[x] = lx !== undefined ? lx : sx;
+                        });
+                        out[k] = subOut;
+                    } else if (serverHasVals) {
+                        // Local empty but server has data → preserve server
+                        out[k] = sv;
+                    } else {
+                        out[k] = lv;
+                    }
+                } else if (lv !== '' && lv !== null && lv !== undefined) {
+                    out[k] = lv;
+                } else if (sv !== undefined) {
+                    out[k] = sv;
+                } else {
+                    out[k] = lv;
+                }
+            });
+            merged[f] = out;
+        });
+
+        // Array fields: union by id — never drop items from either side
+        arrayFields.forEach(function (f) {
+            const L = Array.isArray(merged[f]) ? merged[f] : [];
+            const S = Array.isArray(serverRec[f]) ? serverRec[f] : [];
+            function keyFor(it, i) { return (it && (it.id || it.uid || it._id)) || JSON.stringify(it); }
+            const seen = {};
+            const union = [];
+            // Local first so local wins on id conflict (user's latest edit)
+            L.forEach(function (it, i) { const k = keyFor(it, i); if (!seen[k]) { seen[k] = 1; union.push(it); } });
+            S.forEach(function (it, i) { const k = keyFor(it, i); if (!seen[k]) { seen[k] = 1; union.push(it); } });
+            merged[f] = union;
+        });
+
+        // taxInvoices: keep server if local missing/empty
+        if (!merged.taxInvoices || (
+            (!merged.taxInvoices.abbreviated || merged.taxInvoices.abbreviated.length === 0) &&
+            (!merged.taxInvoices.full || merged.taxInvoices.full.length === 0)
+        )) {
+            if (serverRec.taxInvoices) merged.taxInvoices = serverRec.taxInvoices;
+        }
+
+        // finance: local wins per-field but only when local value is non-empty
+        const finL = local.finance || {}, finS = serverRec.finance || {};
+        const finOut = {};
+        Object.keys(finS).forEach(function (k) { finOut[k] = finS[k]; });
+        Object.keys(finL).forEach(function (k) {
+            if (finL[k] !== undefined && finL[k] !== '' && finL[k] !== null) finOut[k] = finL[k];
+        });
+        merged.finance = finOut;
+
+        // staffId: keep server if local is empty
+        if ((!merged.staffId || merged.staffId === '') && serverRec.staffId) {
+            merged.staffId = serverRec.staffId;
+        }
+
+        merged._existsInDb = true;
+        return merged;
+    },
+
     // --- localStorage backup ---
     _backupRecords() {
         try { localStorage.setItem('fuelAccounting_v1', JSON.stringify(this._cache)); } catch (e) { }
@@ -1014,65 +1126,14 @@ const DB = {
                 if (!error) window._lastSyncedRecord = mergedRecord;
             } else {
                 // Full upsert path: new record, OR snapshot is for a different record
-                // (cascade / background saves). To avoid wiping concurrent edits when a
-                // server row already exists, field-level merge server→record with server-wins
-                // for any field not already populated locally.
+                // (cascade / background saves). Use the shared _mergeForUpsert helper
+                // which does per-subfield merging (e.g. keeps server's meter.end="456"
+                // when local has {start:"123", end:""}). This prevents the class of
+                // bugs where a half-filled local row wipes the server's real values.
                 let recordToUpsert = record;
                 if (existsOnServer && serverRow) {
                     try {
-                        const serverRec = this._fromDb(serverRow);
-                        const objectFields = ['meterReadings', 'stockEntries', 'productStockEntries', 'fuelPrices'];
-                        const arrayFields = ['productSales', 'expenses', 'creditCardEntries',
-                            'bluecardEntries', 'creditCustomers', 'internalUsage'];
-                        const merged = JSON.parse(JSON.stringify(record));
-                        // Object fields: union keys, keep server's keys that local doesn't have
-                        objectFields.forEach(function (f) {
-                            const L = merged[f] || {}, S = serverRec[f] || {};
-                            const out = {};
-                            Object.keys(S).forEach(function (k) { out[k] = S[k]; });
-                            Object.keys(L).forEach(function (k) {
-                                // Keep local if it has real values; otherwise prefer server
-                                const lv = L[k];
-                                if (lv && typeof lv === 'object') {
-                                    const hasVals = Object.keys(lv).some(function (x) {
-                                        const v = lv[x];
-                                        return v !== '' && v !== null && v !== undefined;
-                                    });
-                                    out[k] = hasVals ? lv : (out[k] || lv);
-                                } else {
-                                    out[k] = lv;
-                                }
-                            });
-                            merged[f] = out;
-                        });
-                        // Array fields: union by id; never drop
-                        arrayFields.forEach(function (f) {
-                            const L = Array.isArray(merged[f]) ? merged[f] : [];
-                            const S = Array.isArray(serverRec[f]) ? serverRec[f] : [];
-                            const seen = {};
-                            function keyFor(it, i) { return (it && (it.id || it.uid || it._id)) || JSON.stringify(it); }
-                            const union = [];
-                            L.forEach(function (it, i) { const k = keyFor(it, i); if (!seen[k]) { seen[k] = 1; union.push(it); } });
-                            S.forEach(function (it, i) { const k = keyFor(it, i); if (!seen[k]) { seen[k] = 1; union.push(it); } });
-                            merged[f] = union;
-                        });
-                        // finance: field-level union, local wins when present
-                        const finL = merged.finance || {}, finS = serverRec.finance || {};
-                        const finOut = {};
-                        Object.keys(finS).forEach(function (k) { finOut[k] = finS[k]; });
-                        Object.keys(finL).forEach(function (k) {
-                            if (finL[k] !== undefined && finL[k] !== '' && finL[k] !== null) finOut[k] = finL[k];
-                        });
-                        merged.finance = finOut;
-                        // tax_invoices: union abbreviated/full arrays
-                        const tL = merged.taxInvoices || { abbreviated: [], full: [] };
-                        const tS = serverRec.taxInvoices || { abbreviated: [], full: [] };
-                        merged.taxInvoices = {
-                            abbreviated: (Array.isArray(tL.abbreviated) && tL.abbreviated.length)
-                                ? tL.abbreviated : (tS.abbreviated || []),
-                            full: (Array.isArray(tL.full) && tL.full.length)
-                                ? tL.full : (tS.full || []),
-                        };
+                        const merged = this._mergeForUpsert(record, serverRow);
                         recordToUpsert = merged;
                         // Reflect merge in local cache for consistency
                         this._cache[record.stationId + '_' + record.date] = merged;
@@ -1158,17 +1219,59 @@ const DB = {
             return;
         }
 
-        let ok = 0, fail = 0, errors = [];
+        let ok = 0, fail = 0, skipped = 0, errors = [];
         showToast('กำลัง sync ' + records.length + ' records...', 'info');
 
         const self = this;
+
+        // Pre-fetch ALL server rows once so we can safe-merge without N extra round-trips
+        let serverMap = {};
+        try {
+            const { data: serverRows } = await supabaseClient
+                .from('daily_records')
+                .select('*');
+            (serverRows || []).forEach(row => {
+                serverMap[row.station_id + '_' + row.record_date] = row;
+            });
+            console.log('[forceSyncAll] Prefetched', Object.keys(serverMap).length, 'server rows for safe merge');
+        } catch (e) {
+            console.warn('[forceSyncAll] Server prefetch failed, falling back to naive upsert:', e);
+        }
+
         async function upsertOnce(rec) {
-            const dbData = self._toDb(rec);
+            const serverRow = serverMap[rec.stationId + '_' + rec.date];
+            // Safe merge: if server row exists, preserve server values where local is empty.
+            // This prevents "local has pre-initialized empty meter slots" from wiping
+            // real data that another user (or this user on another device) entered.
+            const toPush = serverRow ? self._mergeForUpsert(rec, serverRow) : rec;
+            const dbData = self._toDb(toPush);
             return await supabaseClient.from('daily_records')
                 .upsert(dbData, { onConflict: 'station_id,record_date' });
         }
 
+        // Safety check: skip records where pushing would wipe server's meter data
+        // with local empties. This is the bug that caused today's mass data loss.
+        function wouldWipeServerMeters(rec) {
+            const serverRow = serverMap[rec.stationId + '_' + rec.date];
+            if (!serverRow) return false;  // No server row → nothing to wipe
+            const serverMeters = serverRow.meter_readings || {};
+            const localMeters = rec.meterReadings || {};
+            const serverHasReal = Object.values(serverMeters).some(m =>
+                m && typeof m === 'object' && ((m.start && m.start !== '') || (m.end && m.end !== '')));
+            if (!serverHasReal) return false;  // Server has no real data — safe to push
+            const localHasReal = Object.values(localMeters).some(m =>
+                m && typeof m === 'object' && ((m.start && m.start !== '') || (m.end && m.end !== '')));
+            // Danger zone: server has real meters, local is all empty → block
+            return !localHasReal;
+        }
+
         for (const rec of records) {
+            // Safety gate — skip push that would cause data loss
+            if (wouldWipeServerMeters(rec)) {
+                skipped++;
+                console.warn('[forceSyncAll] SKIPPED (would wipe server meters):', rec.stationId, rec.date);
+                continue;
+            }
             try {
                 let { error } = await upsertOnce(rec);
                 // Retry once on RLS error after another session refresh — some
@@ -1194,6 +1297,8 @@ const DB = {
         if (fail > 0) {
             console.error('Sync errors:', errors);
             showSyncErrorsModal(ok, fail, errors);
+        } else if (skipped > 0) {
+            showToast('Sync เสร็จ ' + ok + ' รายการ (ข้าม ' + skipped + ' รายการที่อาจเขียนทับข้อมูลใน server)', 'info');
         } else {
             showToast('Sync สำเร็จทั้งหมด ' + ok + ' records!', 'success');
         }
