@@ -1318,6 +1318,46 @@ const DB = {
     getFuelPricesInfo() {
         return { prices: { ...this._pricesCache }, updatedAt: this._pricesUpdatedAt };
     },
+    // Returns the fuel prices effective ON a given date.
+    // Business rule (from user):
+    //   "Lock price per day. Price only changes when pump price is adjusted.
+    //    Example: March 3 diesel=35 stays 35 through March 7. March 8 diesel
+    //    changes to 36, then stays 36 until next adjustment."
+    //
+    // Implementation: walk all cached records, find the one with the most
+    // recent date <= `date` that has a real fuelPrices object, and return it.
+    // Falls back to current global prices only when no historical record is
+    // available (e.g. very first record ever, or price-type not yet set).
+    getFuelPricesAsOf(date) {
+        if (!date) return this.getFuelPrices();
+        const records = Object.values(this._cache || {});
+        // Build per-fuel-type history: for each fuel type, find the most recent
+        // record on-or-before `date` that has a non-zero price for that type.
+        const result = {};
+        const bestDateByType = {};
+        records.forEach(r => {
+            if (!r || !r.date || r.date > date) return;
+            const fp = r.fuelPrices;
+            if (!fp || typeof fp !== 'object') return;
+            Object.keys(fp).forEach(ft => {
+                const v = parseFloat(fp[ft]);
+                if (!(v > 0)) return;
+                if (!bestDateByType[ft] || r.date > bestDateByType[ft]) {
+                    bestDateByType[ft] = r.date;
+                    result[ft] = fp[ft];
+                }
+            });
+        });
+        // Merge with current global prices for any fuel type that has never had
+        // a historical price on-or-before `date` (e.g. newly-added fuel type).
+        const current = this._pricesCache || {};
+        Object.keys(current).forEach(ft => {
+            if (!(ft in result) && parseFloat(current[ft]) > 0) {
+                result[ft] = current[ft];
+            }
+        });
+        return result;
+    },
     saveFuelPrices(prices) {
         this._pricesCache = { ...prices };
         this._pricesUpdatedAt = new Date().toISOString();
@@ -2551,7 +2591,7 @@ function showRecordSummaryPopup(stationId, date) {
     const record = DB.getDailyRecord(stationId, date);
     if (!record) { showToast('ไม่พบข้อมูลรายการนี้', 'error'); return; }
 
-    const fuelPrices = hasFuelPrices(record.fuelPrices) ? record.fuelPrices : DB.getFuelPrices();
+    const fuelPrices = hasFuelPrices(record.fuelPrices) ? record.fuelPrices : DB.getFuelPricesAsOf(record.date || date);
     const tanks = REF.tanks.filter(t => t.stationId === stationId);
     const stationName = getStationName(stationId);
 
@@ -3349,7 +3389,7 @@ function _autoSaveBeforeSwitch() {
         const staffId = document.getElementById('entryStaff') ? document.getElementById('entryStaff').value : '';
 
         // Calculate finance totals (same logic as saveCurrentRecord)
-        const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPrices();
+        const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPricesAsOf(_currentEntryDate);
         const _tanks = REF.tanks.filter(t => t.stationId === _currentEntryStation);
         let fuelSalesValue = 0;
         _tanks.forEach(tank => {
@@ -3467,7 +3507,7 @@ function onStationChange(existingRecord) {
                 cashDay: 0, cashNight: 0, slipDay: null, slipNight: null, slipCreditCard: null, slipBluecard: null, remark: '',
                 ...(existingRecord.finance || {}),
             },
-            fuelPrices: hasFuelPrices(existingRecord.fuelPrices) ? existingRecord.fuelPrices : DB.getFuelPrices(),
+            fuelPrices: hasFuelPrices(existingRecord.fuelPrices) ? existingRecord.fuelPrices : DB.getFuelPricesAsOf(existingRecord.date),
             internalUsage: existingRecord.internalUsage || [],
         };
     } else {
@@ -3492,7 +3532,7 @@ function onStationChange(existingRecord) {
                     cashDay: 0, cashNight: 0, slipDay: null, slipNight: null, slipCreditCard: null, slipBluecard: null, remark: '',
                     ...(existing.finance || {}),
                 },
-                fuelPrices: hasFuelPrices(existing.fuelPrices) ? existing.fuelPrices : DB.getFuelPrices(),
+                fuelPrices: hasFuelPrices(existing.fuelPrices) ? existing.fuelPrices : DB.getFuelPricesAsOf(date),
                 internalUsage: existing.internalUsage || [],
             };
         } else {
@@ -3509,7 +3549,10 @@ function onStationChange(existingRecord) {
                 bluecardEntries: [],
                 creditCustomers: [],
                 finance: { otherIncome: 0, creditSales: 0, creditCardAmt: 0, bluecardAmt: 0, qrTransferAmt: 0, discounts: 0, actualCashSent: 0, remark: '' },
-                fuelPrices: DB.getFuelPrices(),
+                // Use price effective on THIS date, not the current global price.
+                // This preserves the "locked per day" rule when creating a
+                // historical record whose date is before the latest price change.
+                fuelPrices: DB.getFuelPricesAsOf(date),
                 internalUsage: [],
             };
         }
@@ -3517,7 +3560,9 @@ function onStationChange(existingRecord) {
 
     // Always lock fuel prices into the record (prevent price changes affecting old records)
     if (!hasFuelPrices(formData.fuelPrices)) {
-        formData.fuelPrices = DB.getFuelPrices();
+        const _d = (typeof document !== 'undefined' && document.getElementById('entryDate'))
+            ? document.getElementById('entryDate').value : null;
+        formData.fuelPrices = _d ? DB.getFuelPricesAsOf(_d) : DB.getFuelPrices();
     }
 
     // Always sync meter start from previous day's end (ensure continuity)
@@ -3841,7 +3886,7 @@ function renderStockTab(stationId) {
     html += '</tbody></table></div></div>';
 
     // Summary: fuel sales by type
-    const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPrices();
+    const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPricesAsOf(_currentEntryDate);
     const salesByType = {};
     tanks.forEach(function (tank) {
         const tankMeters = REF.meters.filter(m => m.tankKey === tank.key);
@@ -3951,7 +3996,7 @@ function printStockSummary() {
 
     var station = REF.stations.find(function (s) { return s.id === stationId; });
     var tanks = REF.tanks.filter(function (t) { return t.stationId === stationId; });
-    var fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPrices();
+    var fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPricesAsOf(dateStr);
 
     // Stock detail rows
     var stockRows = '';
@@ -4554,7 +4599,7 @@ function renderInternalUsageTab() {
     if (!el) return;
     const stationId = document.getElementById('entryStation').value;
     const stationTanks = REF.tanks.filter(t => t.stationId === stationId);
-    const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPrices();
+    const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPricesAsOf(_currentEntryDate);
     if (!formData.internalUsage) formData.internalUsage = [];
 
     let totalLiters = 0, totalBaht = 0;
@@ -4924,7 +4969,7 @@ function updateCreditRow(input, field) {
     }
 
     const item = formData.creditCustomers[idx];
-    const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPrices();
+    const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPricesAsOf(_currentEntryDate);
     // Get price: fuel price or product price
     let price = 0;
     if ((item.fuelType || '').startsWith('product:')) {
@@ -5222,7 +5267,7 @@ function printCreditCustomers() {
     var customers = formData.creditCustomers || [];
     if (customers.length === 0) { showToast('ไม่มีรายการลูกหนี้เงินเชื่อ', 'error'); return; }
 
-    var fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPrices();
+    var fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPricesAsOf(dateStr);
 
     // Build rows
     var totalLiters = 0, totalAmount = 0;
@@ -5336,7 +5381,7 @@ function renderSummaryTab() {
     if (!stationId) return;
 
     const el = document.getElementById('subtab-summary');
-    const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPrices();
+    const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPricesAsOf(_currentEntryDate);
 
     // Calculate fuel sales by type
     const tanks = REF.tanks.filter(t => t.stationId === stationId);
@@ -5574,7 +5619,7 @@ function printDailySummary() {
     if (!stationId || !dateStr) return;
 
     const station = REF.stations.find(s => s.id === stationId);
-    const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPrices();
+    const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPricesAsOf(dateStr);
     const tanks = REF.tanks.filter(t => t.stationId === stationId);
 
     // Fuel sales
@@ -5809,13 +5854,35 @@ function printDailySummary() {
 
 function updateFuelPrice(input) {
     const fuelType = input.dataset.fuel;
-    if (!formData.fuelPrices) formData.fuelPrices = DB.getFuelPrices();
+    const entryDate = (document.getElementById('entryDate') || {}).value || null;
+    if (!formData.fuelPrices) {
+        formData.fuelPrices = entryDate ? DB.getFuelPricesAsOf(entryDate) : DB.getFuelPrices();
+    }
     formData.fuelPrices[fuelType] = input.value;
 
-    // Lock new price as default for future records
-    const globalPrices = DB.getFuelPrices();
-    globalPrices[fuelType] = input.value;
-    DB.saveFuelPrices(globalPrices);
+    // Update the global "current price" ONLY when the edited record is the
+    // most recent (its date >= the most recent record that already has a
+    // price for this fuel type). Otherwise we'd be rewriting history: the
+    // user might be correcting an old record and we must not overwrite the
+    // current pump price with a stale value.
+    try {
+        const records = Object.values(DB._cache || {});
+        let latestDateWithPrice = '';
+        records.forEach(r => {
+            if (!r || !r.date) return;
+            const fp = r.fuelPrices;
+            if (!fp || !(parseFloat(fp[fuelType]) > 0)) return;
+            if (r.date > latestDateWithPrice) latestDateWithPrice = r.date;
+        });
+        // Include the record currently being edited (may not yet be in _cache).
+        if (entryDate && entryDate > latestDateWithPrice) latestDateWithPrice = entryDate;
+        // Only propagate to global if THIS record's date is the latest.
+        if (!entryDate || entryDate >= latestDateWithPrice) {
+            const globalPrices = DB.getFuelPrices();
+            globalPrices[fuelType] = input.value;
+            DB.saveFuelPrices(globalPrices);
+        }
+    } catch (e) { console.warn('Global price propagation skipped:', e); }
 
     renderSummaryTab();
 }
@@ -5957,7 +6024,7 @@ function saveCurrentRecord() {
     }
 
     // Calculate finance totals
-    const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPrices();
+    const fuelPrices = hasFuelPrices(formData.fuelPrices) ? formData.fuelPrices : DB.getFuelPricesAsOf(date);
     const tanks = REF.tanks.filter(t => t.stationId === stationId);
     let fuelSalesValue = 0;
 
@@ -8226,7 +8293,7 @@ function renderTaxEntryForm() {
     const { stationId, date } = taxReportState;
     if (taxReportState.type !== 'A' || !stationId) { container.innerHTML = ''; return; }
     const _taxRecord = date ? DB.getDailyRecord(stationId, date) : null;
-    const prices = hasFuelPrices(_taxRecord && _taxRecord.fuelPrices) ? _taxRecord.fuelPrices : DB.getFuelPrices();
+    const prices = hasFuelPrices(_taxRecord && _taxRecord.fuelPrices) ? _taxRecord.fuelPrices : DB.getFuelPricesAsOf(date);
     const station = REF.stations.find(s => s.id === stationId);
     const stationTanks = REF.tanks.filter(t => t.stationId === stationId);
 
@@ -8477,7 +8544,7 @@ const PRICE_SHORT_LABELS = {
 
 function generateReportA(stationId, date, printOpts) {
     const record = DB.getDailyRecord(stationId, date);
-    const prices = hasFuelPrices(record && record.fuelPrices) ? record.fuelPrices : DB.getFuelPrices();
+    const prices = hasFuelPrices(record && record.fuelPrices) ? record.fuelPrices : DB.getFuelPricesAsOf(date);
     const station = REF.stations.find(s => s.id === stationId);
 
     // Group by TANK (not fuel type) — each tank is a separate column group
@@ -8778,10 +8845,12 @@ function generateReportA(stationId, date, printOpts) {
 
 // ===== REPORT A MONTHLY: สรุปรายเดือน =====
 function generateReportAMonthly(stationId, yearMonth, printOpts) {
-    let prices = DB.getFuelPrices(); // fallback, will be overridden by last record's prices
     const station = REF.stations.find(s => s.id === stationId);
     const [year, month] = yearMonth.split('-').map(Number);
     const daysInMonth = new Date(year, month, 0).getDate();
+    // fallback: use end-of-month as the effective date; will be overridden by last record's prices
+    const _endOfMonth = `${year}-${String(month).padStart(2,'0')}-${String(daysInMonth).padStart(2,'0')}`;
+    let prices = DB.getFuelPricesAsOf(_endOfMonth);
 
     // Group by TANK — same as daily Report A
     const tanks = REF.tanks.filter(t => t.stationId === stationId);
