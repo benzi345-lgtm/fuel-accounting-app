@@ -876,6 +876,127 @@ const DB = {
         this._loaded = true;
     },
 
+    // --- Realtime subscription ---
+    // Subscribes to Supabase Realtime so that when any user (on any device)
+    // saves/updates/deletes a record, this client sees the change within
+    // ~1 second without having to reload or re-init.
+    //
+    // Requires: SQL `enable-realtime.sql` has been run on the project.
+    _subscribeRealtime() {
+        if (this._realtimeChannel) return; // already subscribed
+        const self = this;
+        const handle = (table) => (payload) => {
+            try { self._handleRealtimeEvent(table, payload); }
+            catch (e) { console.warn('[Realtime] handler error:', e); }
+        };
+        this._realtimeChannel = supabaseClient
+            .channel('fuel_accounting_sync_' + Math.random().toString(36).slice(2, 8))
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_records' },           handle('daily_records'))
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'fuel_prices' },             handle('fuel_prices'))
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'tax_entries' },             handle('tax_entries'))
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'credit_payments' },         handle('credit_payments'))
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'app_settings' },            handle('app_settings'))
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'custom_credit_customers' }, handle('custom_credit_customers'))
+            .subscribe((status) => {
+                console.log('[Realtime] channel status:', status);
+            });
+    },
+    _unsubscribeRealtime() {
+        if (this._realtimeChannel) {
+            try { supabaseClient.removeChannel(this._realtimeChannel); } catch (e) {}
+            this._realtimeChannel = null;
+        }
+    },
+    // Track our own recent writes so we can ignore the echo event that comes
+    // back for our own upserts (avoids disrupting the user's in-progress form).
+    _markOwnWrite(key) {
+        this._ownWrites = this._ownWrites || {};
+        this._ownWrites[key] = Date.now();
+        // Cleanup: drop entries older than 5 seconds
+        const cutoff = Date.now() - 5000;
+        Object.keys(this._ownWrites).forEach(k => {
+            if (this._ownWrites[k] < cutoff) delete this._ownWrites[k];
+        });
+    },
+    _isOwnEcho(key) {
+        if (!this._ownWrites) return false;
+        const t = this._ownWrites[key];
+        return t && (Date.now() - t < 5000);
+    },
+    _handleRealtimeEvent(table, payload) {
+        const eventType = payload.eventType || payload.type;
+        const newRow = payload.new;
+        const oldRow = payload.old;
+        let changedKey = null;
+
+        if (table === 'daily_records') {
+            if (eventType === 'DELETE') {
+                if (oldRow && oldRow.station_id && oldRow.record_date) {
+                    const k = oldRow.station_id + '_' + oldRow.record_date;
+                    delete this._cache[k];
+                    changedKey = k;
+                }
+            } else if (newRow) {
+                const rec = this._fromDb(newRow);
+                const k = rec.stationId + '_' + rec.date;
+                // Skip echo of our own recent write
+                if (this._isOwnEcho(k)) return;
+                this._cache[k] = rec;
+                changedKey = k;
+            }
+            this._backupRecords();
+
+        } else if (table === 'fuel_prices') {
+            if (eventType === 'DELETE') {
+                if (oldRow && oldRow.fuel_type) delete this._pricesCache[oldRow.fuel_type];
+            } else if (newRow) {
+                this._pricesCache[newRow.fuel_type] = parseFloat(newRow.price);
+                this._pricesUpdatedAt = newRow.updated_at || new Date().toISOString();
+            }
+            this._backupPrices();
+
+        } else if (table === 'tax_entries') {
+            const row = newRow || oldRow;
+            if (!row) return;
+            const k = row.station_id + '_' + row.record_date;
+            if (eventType === 'DELETE') delete this._taxCache[k];
+            else if (newRow) this._taxCache[k] = newRow.data;
+            this._backupTax();
+
+        } else if (table === 'credit_payments') {
+            // credit_payments is stored as an array of payment objects
+            if (!Array.isArray(this._creditPaymentsCache)) this._creditPaymentsCache = [];
+            if (eventType === 'DELETE' && oldRow) {
+                const oid = (oldRow.data && oldRow.data.id) || oldRow.id;
+                if (oid) this._creditPaymentsCache = this._creditPaymentsCache.filter(p => p.id !== oid);
+            } else if (newRow) {
+                const data = newRow.data || newRow;
+                const pid = data.id;
+                const idx = this._creditPaymentsCache.findIndex(p => p.id === pid);
+                if (idx >= 0) this._creditPaymentsCache[idx] = data;
+                else this._creditPaymentsCache.push(data);
+            }
+            this._backupCreditPayments();
+
+        } else if (table === 'app_settings') {
+            if (newRow && newRow.key === 'credit_settings') {
+                this._creditSettingsCache = newRow.data || this._creditSettingsCache;
+                this._backupCreditSettings();
+            }
+
+        } else if (table === 'custom_credit_customers') {
+            // Full refresh of custom credit customers on any change
+            if (typeof loadCustomCreditCustomers === 'function') {
+                loadCustomCreditCustomers();
+            }
+        }
+
+        // Trigger UI refresh (if page can safely re-render)
+        if (typeof refreshViewAfterRealtime === 'function') {
+            refreshViewAfterRealtime(table, changedKey);
+        }
+    },
+
     // --- Daily Records (synchronous reads, async sync) ---
     getDailyRecord(stationId, date) {
         return this._cache[`${stationId}_${date}`] || null;
@@ -1059,6 +1180,9 @@ const DB = {
     },
     async _syncRecord(record) {
         try {
+            // Mark as our own write so the realtime echo doesn't disrupt
+            // the form the user is still editing.
+            this._markOwnWrite(record.stationId + '_' + record.date);
             // Ensure session is still valid before syncing
             let { data: { session } } = await supabaseClient.auth.getSession();
             if (!session) {
@@ -2053,6 +2177,34 @@ function renderPage(page) {
         case 'tax-reports': renderTaxReports(el); break;
         case 'user-management': renderUserManagement(el); break;
     }
+}
+
+// Called by DB._handleRealtimeEvent whenever another user changes data.
+// We re-render the current read-only view so updates appear instantly.
+// For daily-entry we DO NOT re-render (it would wipe the user's in-progress
+// form). Instead we show a small indicator that external changes happened.
+let _realtimeRefreshPending = false;
+function refreshViewAfterRealtime(table, changedKey) {
+    // Debounce: if many events fire rapidly (e.g. bulk upsert), only re-render once
+    if (_realtimeRefreshPending) return;
+    _realtimeRefreshPending = true;
+    setTimeout(() => {
+        _realtimeRefreshPending = false;
+        try {
+            if (currentPage === 'daily-entry') {
+                // Don't wipe the form. If the edited record matches the one
+                // currently open, show a toast so the user knows to reload.
+                const sid = document.getElementById('entryStation');
+                const dt  = document.getElementById('entryDate');
+                if (table === 'daily_records' && sid && dt && changedKey === (sid.value + '_' + dt.value)) {
+                    showToast('มีการแก้ไขรายการนี้จาก user อื่น — เปิดใหม่เพื่อดูข้อมูลล่าสุด', 'info');
+                }
+                return;
+            }
+            // Safe to re-render read-only views
+            renderPage(currentPage);
+        } catch (e) { console.warn('[Realtime] refresh failed:', e); }
+    }, 200);
 }
 
 // ===== TOAST =====
@@ -6464,6 +6616,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (hasSession) {
         await DB.init();
         await loadCustomCreditCustomers();
+        DB._subscribeRealtime();
         showApp();
     } else {
         showLoginPage();
@@ -6529,6 +6682,7 @@ async function handleLogin() {
         await Auth.signIn(email, password);
         await DB.init();
         await loadCustomCreditCustomers();
+        DB._subscribeRealtime();
         showApp();
     } catch (e) {
         errorEl.textContent = 'เข้าสู่ระบบไม่สำเร็จ: ' + (e.message || 'ลองอีกครั้ง');
@@ -6539,6 +6693,7 @@ async function handleLogin() {
 }
 
 async function handleLogout() {
+    try { DB._unsubscribeRealtime(); } catch (e) {}
     await Auth.signOut();
     showLoginPage();
 }
