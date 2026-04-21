@@ -6543,6 +6543,57 @@ async function handleLogout() {
     showLoginPage();
 }
 
+// ===== RELOAD FROM SUPABASE =====
+// Clears all cached data in this browser's localStorage and reloads the page,
+// forcing the app to pull fresh data from Supabase. Used when the employee's
+// local cache is out-of-sync with Supabase (e.g. stale data after admin sync).
+async function reloadFromSupabase() {
+    // Safety: check if there's any local-only data that hasn't been synced.
+    // If so, warn the user before wiping.
+    const cache = (DB && DB._cache) ? DB._cache : {};
+    const localCount = Object.keys(cache).length;
+
+    let confirmMsg = 'ต้องการโหลดข้อมูลใหม่จาก Supabase หรือไม่?\n\n'
+        + '• ข้อมูลในเครื่องนี้ (' + localCount + ' รายการ) จะถูกล้าง\n'
+        + '• ระบบจะดาวน์โหลดข้อมูลสดจาก Supabase มาแทน\n'
+        + '• ใช้เมื่อข้อมูลในเครื่องไม่ตรงกับ server\n\n'
+        + '⚠️ ถ้ามีข้อมูลที่ยังไม่ได้ sync ขึ้น Supabase ข้อมูลนั้นจะหาย\n'
+        + '   แนะนำให้กด "Sync" ก่อนถ้าไม่แน่ใจ';
+
+    if (!confirm(confirmMsg)) return;
+
+    // Try a quick pre-check: does Supabase have data? If we're about to wipe
+    // local and Supabase is unreachable/empty, the user ends up with nothing.
+    try {
+        const { data, error } = await supabaseClient
+            .from('daily_records')
+            .select('station_id', { count: 'exact', head: true });
+        if (error) {
+            alert('ไม่สามารถติดต่อ Supabase ได้ (' + (error.message || error) + ')\n\nยกเลิกการ reload เพื่อความปลอดภัย กรุณาตรวจสอบ internet แล้วลองใหม่');
+            return;
+        }
+    } catch (e) {
+        alert('ไม่สามารถติดต่อ Supabase ได้ (network error)\n\nยกเลิกการ reload เพื่อความปลอดภัย กรุณาตรวจสอบ internet แล้วลองใหม่');
+        return;
+    }
+
+    // Wipe all app-related localStorage keys
+    const keys = [
+        'fuelAccounting_v1',           // daily records
+        'fuelPrices_v2',                // fuel prices
+        'fuelAccounting_taxEntry_v1',   // tax entries
+        'fuelAccounting_creditPayments_v1',
+        'fuelAccounting_creditSettings_v1',
+    ];
+    keys.forEach(k => {
+        try { localStorage.removeItem(k); } catch (e) {}
+    });
+
+    // Reload the page — init() will then pull fresh from Supabase
+    showToast('กำลังล้างข้อมูลในเครื่องและโหลดใหม่...', 'info');
+    setTimeout(() => { location.reload(); }, 500);
+}
+
 // ===== USER MANAGEMENT PAGE (Admin Only) =====
 function renderUserManagement(el) {
     if (!Auth.isAdmin()) {

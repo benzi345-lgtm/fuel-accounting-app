@@ -90,6 +90,10 @@
                         <span class="sync-icon">🔄</span>
                         <span class="sync-label">Sync</span>
                     </button>
+                    <button id="reloadFromSupabaseBtn" onclick="reloadFromSupabase()" class="btn-reload" title="ล้างข้อมูลในเครื่องนี้แล้วโหลดใหม่จาก Supabase (ใช้เมื่อข้อมูลในเครื่องไม่ตรงกับ server)">
+                        <span class="reload-icon">⬇️</span>
+                        <span class="reload-label">Reload</span>
+                    </button>
                     <span id="userDisplayName"></span>
                     <span id="userRole" class="role-badge"></span>
                     <button onclick="handleLogout()" class="btn-logout">ออกจากระบบ</button>

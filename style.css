@@ -1744,6 +1744,38 @@ tfoot td {
     .btn-sync { padding: 6px 8px; }
 }
 
+/* Reload-from-Supabase button */
+.btn-reload {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: #eff6ff;
+    border: 1px solid #3b82f6;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    color: #1e40af;
+    transition: all 0.15s;
+    margin-right: 8px;
+}
+.btn-reload:hover {
+    background: #3b82f6;
+    color: white;
+}
+.btn-reload:active {
+    transform: scale(0.96);
+}
+.btn-reload .reload-icon {
+    font-size: 14px;
+    line-height: 1;
+    display: inline-block;
+}
+@media (max-width: 640px) {
+    .btn-reload .reload-label { display: none; }
+    .btn-reload { padding: 6px 8px; }
+}
+
 /* Section Toggle Grid */
 .section-toggle-grid {
     display: grid;
