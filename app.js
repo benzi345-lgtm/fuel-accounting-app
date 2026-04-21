@@ -882,30 +882,84 @@ const DB = {
     // ~1 second without having to reload or re-init.
     //
     // Requires: SQL `enable-realtime.sql` has been run on the project.
-    _subscribeRealtime() {
+    async _subscribeRealtime() {
         if (this._realtimeChannel) return; // already subscribed
         const self = this;
+
+        // Ensure the realtime client is using the current JWT (some Supabase
+        // versions need this explicit call; without it, channel connects
+        // but RLS blocks every event).
+        try {
+            const { data: { session } } = await supabaseClient.auth.getSession();
+            if (session && session.access_token && supabaseClient.realtime
+                && typeof supabaseClient.realtime.setAuth === 'function') {
+                supabaseClient.realtime.setAuth(session.access_token);
+            }
+        } catch (e) { console.warn('[Realtime] setAuth failed:', e); }
+
         const handle = (table) => (payload) => {
-            try { self._handleRealtimeEvent(table, payload); }
-            catch (e) { console.warn('[Realtime] handler error:', e); }
+            try {
+                const evt = payload.eventType || payload.type;
+                const row = payload.new || payload.old || {};
+                const id = (row.station_id && row.record_date)
+                    ? row.station_id + '_' + row.record_date
+                    : (row.fuel_type || row.key || row.id || '(unknown)');
+                console.log('[Realtime] 📥 event:', table, evt, id);
+                self._handleRealtimeEvent(table, payload);
+            } catch (e) { console.warn('[Realtime] handler error:', e); }
         };
+
+        // Stable channel name per session (not per random call)
+        const chanName = 'fuel_sync_' + (self._realtimeChannelId = self._realtimeChannelId
+            || Math.random().toString(36).slice(2, 8));
+
         this._realtimeChannel = supabaseClient
-            .channel('fuel_accounting_sync_' + Math.random().toString(36).slice(2, 8))
+            .channel(chanName)
             .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_records' },           handle('daily_records'))
             .on('postgres_changes', { event: '*', schema: 'public', table: 'fuel_prices' },             handle('fuel_prices'))
             .on('postgres_changes', { event: '*', schema: 'public', table: 'tax_entries' },             handle('tax_entries'))
             .on('postgres_changes', { event: '*', schema: 'public', table: 'credit_payments' },         handle('credit_payments'))
             .on('postgres_changes', { event: '*', schema: 'public', table: 'app_settings' },            handle('app_settings'))
             .on('postgres_changes', { event: '*', schema: 'public', table: 'custom_credit_customers' }, handle('custom_credit_customers'))
-            .subscribe((status) => {
-                console.log('[Realtime] channel status:', status);
+            .subscribe((status, err) => {
+                console.log('[Realtime] channel status:', status, err || '');
+                self._realtimeStatus = status;
+                if (status === 'SUBSCRIBED') {
+                    console.log('[Realtime] ✅ connected — waiting for events');
+                } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+                    console.warn('[Realtime] ❌ connection problem (', status, ') — will retry in 5s');
+                    // Auto-reconnect after a delay
+                    setTimeout(() => {
+                        try { supabaseClient.removeChannel(self._realtimeChannel); } catch (e) {}
+                        self._realtimeChannel = null;
+                        self._subscribeRealtime();
+                    }, 5000);
+                } else if (status === 'CLOSED') {
+                    console.log('[Realtime] channel closed');
+                }
             });
     },
     _unsubscribeRealtime() {
         if (this._realtimeChannel) {
             try { supabaseClient.removeChannel(this._realtimeChannel); } catch (e) {}
             this._realtimeChannel = null;
+            this._realtimeStatus = 'CLOSED';
         }
+    },
+    // Call this from Console to check if Realtime is working:
+    //   DB.diagnoseRealtime()
+    diagnoseRealtime() {
+        console.log('=== Realtime Diagnostic ===');
+        console.log('Status:', this._realtimeStatus || '(never subscribed)');
+        console.log('Channel:', this._realtimeChannel ? 'exists' : 'none');
+        console.log('supabaseClient.realtime:', !!supabaseClient.realtime);
+        console.log('Auth session:', supabaseClient.auth.getSession().then(r => {
+            console.log('  has session:', !!(r.data && r.data.session));
+            console.log('  access_token len:', (r.data && r.data.session && r.data.session.access_token || '').length);
+        }));
+        console.log('To verify server-side, run in Supabase SQL Editor:');
+        console.log("  SELECT tablename FROM pg_publication_tables WHERE pubname='supabase_realtime';");
+        console.log('Expected tables: daily_records, fuel_prices, tax_entries, credit_payments, app_settings, custom_credit_customers, user_profiles');
     },
     // Track our own recent writes so we can ignore the echo event that comes
     // back for our own upserts (avoids disrupting the user's in-progress form).
@@ -2191,6 +2245,7 @@ function refreshViewAfterRealtime(table, changedKey) {
     setTimeout(() => {
         _realtimeRefreshPending = false;
         try {
+            console.log('[Realtime] 🔄 refreshing view:', currentPage, '(trigger:', table, changedKey, ')');
             if (currentPage === 'daily-entry') {
                 // Don't wipe the form. If the edited record matches the one
                 // currently open, show a toast so the user knows to reload.
@@ -2201,7 +2256,14 @@ function refreshViewAfterRealtime(table, changedKey) {
                 }
                 return;
             }
-            // Safe to re-render read-only views
+            // Dashboard: update only the content sections (don't rebuild filter bar
+            // — would reset the user's current filter selections and destroy charts).
+            if (currentPage === 'dashboard' && typeof renderDashboardContent === 'function') {
+                renderDashboardContent();
+                if (typeof renderDashboardCharts === 'function') renderDashboardCharts();
+                return;
+            }
+            // Other pages: full re-render is safe
             renderPage(currentPage);
         } catch (e) { console.warn('[Realtime] refresh failed:', e); }
     }, 200);
