@@ -780,13 +780,13 @@ const DB = {
             var localCount = Object.keys(localRecords).length;
             var supabaseCount = Object.keys(supabaseRecords).length;
             if (supabaseCount === 0 && localCount > 0) {
-                // Supabase empty but localStorage has data — keep localStorage data (likely sync issue)
-                console.warn('Supabase returned 0 records but localStorage has ' + localCount + ' — keeping localStorage data');
+                // Supabase returned no rows but localStorage has data. Keep local
+                // in cache so the UI isn't blank, but do NOT auto-push: a stale
+                // localStorage can overwrite real server data that merely failed
+                // to load this time. User clicks the Force Sync button when sure.
+                console.warn('Supabase returned 0 records but localStorage has ' + localCount + ' — keeping localStorage data. Click Force Sync manually if this is intentional.');
                 this._cache = localRecords;
-                // Try to sync localStorage records to Supabase in background
-                setTimeout(() => { this.forceSyncAll(); }, 3000);
             } else if (supabaseCount > 0 && localCount > 0) {
-                // Both have data — merge carefully to preserve any local entries not yet synced
                 this._cache = {};
                 var allKeys = {};
                 Object.keys(localRecords).forEach(function (k) { allKeys[k] = 1; });
@@ -795,14 +795,11 @@ const DB = {
                 Object.keys(allKeys).forEach(function (k) {
                     var lr = localRecords[k], sr = supabaseRecords[k];
                     if (lr && sr) {
-                        // Both exist: merge using 2-way union to prevent entry loss
                         self._cache[k] = self._mergeLocalServer(lr, sr);
                     } else {
                         self._cache[k] = lr || sr;
                     }
                 });
-                // Sync any records that had local-only changes back to Supabase
-                setTimeout(function () { self.forceSyncAll(); }, 3000);
             } else {
                 this._cache = supabaseRecords;
             }
@@ -897,6 +894,25 @@ const DB = {
             }
         } catch (e) { console.warn('[Realtime] setAuth failed:', e); }
 
+        // Keep Realtime token fresh across JWT rotations. Supabase refreshes
+        // the access token every hour; without re-calling setAuth the channel
+        // eventually receives events through an expired token and RLS silently
+        // blocks them. Attach the listener once per session.
+        if (!this._authListenerAttached) {
+            try {
+                supabaseClient.auth.onAuthStateChange((event, session) => {
+                    if (!session || !session.access_token) return;
+                    if (supabaseClient.realtime && typeof supabaseClient.realtime.setAuth === 'function') {
+                        try {
+                            supabaseClient.realtime.setAuth(session.access_token);
+                            console.log('[Realtime] 🔑 token refreshed on', event);
+                        } catch (e) { console.warn('[Realtime] setAuth on refresh failed:', e); }
+                    }
+                });
+                this._authListenerAttached = true;
+            } catch (e) { console.warn('[Realtime] onAuthStateChange wiring failed:', e); }
+        }
+
         const handle = (table) => (payload) => {
             try {
                 const evt = payload.eventType || payload.type;
@@ -963,19 +979,30 @@ const DB = {
     },
     // Track our own recent writes so we can ignore the echo event that comes
     // back for our own upserts (avoids disrupting the user's in-progress form).
-    _markOwnWrite(key) {
+    //
+    // IMPORTANT: uses updated_at as a nonce, not wall-clock time. A wall-clock
+    // window would wrongly skip events from OTHER users who happened to save
+    // the same record within the window (real-world: two cashiers closing the
+    // same station on the same day). The server echo carries the exact
+    // updated_at we sent, so equality check pinpoints our own row.
+    _markOwnWrite(key, updatedAt) {
+        if (!updatedAt) return;
         this._ownWrites = this._ownWrites || {};
-        this._ownWrites[key] = Date.now();
-        // Cleanup: drop entries older than 5 seconds
-        const cutoff = Date.now() - 5000;
+        if (!this._ownWrites[key]) this._ownWrites[key] = {};
+        // Keep a small set of recent timestamps per key (in case of rapid re-saves)
+        this._ownWrites[key][updatedAt] = Date.now();
+        // Cleanup: drop timestamps older than 60 seconds
+        const cutoff = Date.now() - 60000;
         Object.keys(this._ownWrites).forEach(k => {
-            if (this._ownWrites[k] < cutoff) delete this._ownWrites[k];
+            Object.keys(this._ownWrites[k]).forEach(ts => {
+                if (this._ownWrites[k][ts] < cutoff) delete this._ownWrites[k][ts];
+            });
+            if (Object.keys(this._ownWrites[k]).length === 0) delete this._ownWrites[k];
         });
     },
-    _isOwnEcho(key) {
-        if (!this._ownWrites) return false;
-        const t = this._ownWrites[key];
-        return t && (Date.now() - t < 5000);
+    _isOwnEcho(key, updatedAt) {
+        if (!updatedAt || !this._ownWrites || !this._ownWrites[key]) return false;
+        return !!this._ownWrites[key][updatedAt];
     },
     _handleRealtimeEvent(table, payload) {
         const eventType = payload.eventType || payload.type;
@@ -993,8 +1020,8 @@ const DB = {
             } else if (newRow) {
                 const rec = this._fromDb(newRow);
                 const k = rec.stationId + '_' + rec.date;
-                // Skip echo of our own recent write
-                if (this._isOwnEcho(k)) return;
+                // Skip echo of our own recent write (matched by exact updated_at nonce)
+                if (this._isOwnEcho(k, newRow.updated_at)) return;
                 this._cache[k] = rec;
                 changedKey = k;
             }
@@ -1057,6 +1084,17 @@ const DB = {
     },
     saveDailyRecord(record) {
         const key = `${record.stationId}_${record.date}`;
+        // Preserve cache fields the form doesn't supply (e.g. meter_readings
+        // that another user just wrote via realtime) so we don't show a stale
+        // blank for an untouched section between this assignment and the
+        // async server merge completing inside _syncRecord.
+        const existing = this._cache[key];
+        if (existing) {
+            try {
+                const existingDbRow = this._toDb(existing);
+                record = this._mergeForUpsert(record, existingDbRow);
+            } catch (e) { console.warn('Pre-save cache merge failed:', e); }
+        }
         this._cache[key] = record;
         this._backupRecords();
         this._syncRecord(record);
@@ -1070,12 +1108,55 @@ const DB = {
         var arrayFields = ['taxInvoices', 'expenses', 'productSales', 'creditCustomers',
             'creditCardEntries', 'bluecardEntries', 'internalUsage'];
         var out = JSON.parse(JSON.stringify(server));
-        // Object fields: union by key; local wins on conflict (local is more recent edits)
+        // Object fields: union by key. Local wins ONLY when local value is
+        // non-empty. An empty slot (e.g. pre-initialized meter { start:'',
+        // end:'' } created when the form opened the record) must NOT overwrite
+        // real data server has — otherwise a stale local cache wipes data
+        // saved on another device/session during this init-time merge.
         objectFields.forEach(function (f) {
             var L = local[f] || {}, S = server[f] || {};
             var merged = {};
             Object.keys(S).forEach(function (k) { merged[k] = S[k]; });
-            Object.keys(L).forEach(function (k) { merged[k] = L[k]; });
+            Object.keys(L).forEach(function (k) {
+                var lv = L[k];
+                var sv = S[k];
+                if (lv && typeof lv === 'object' && !Array.isArray(lv)) {
+                    var localHasVals = Object.keys(lv).some(function (x) {
+                        var v = lv[x];
+                        return v !== '' && v !== null && v !== undefined;
+                    });
+                    var serverHasVals = sv && typeof sv === 'object' && Object.keys(sv).some(function (x) {
+                        var v = sv[x];
+                        return v !== '' && v !== null && v !== undefined;
+                    });
+                    if (localHasVals) {
+                        var subOut = {};
+                        var subKeys = {};
+                        Object.keys(lv).forEach(function (x) { subKeys[x] = 1; });
+                        if (sv && typeof sv === 'object') Object.keys(sv).forEach(function (x) { subKeys[x] = 1; });
+                        Object.keys(subKeys).forEach(function (x) {
+                            var lx = lv[x];
+                            var sx = sv ? sv[x] : undefined;
+                            var lHas = lx !== '' && lx !== null && lx !== undefined;
+                            var sHas = sx !== '' && sx !== null && sx !== undefined;
+                            if (lHas) subOut[x] = lx;
+                            else if (sHas) subOut[x] = sx;
+                            else subOut[x] = lx !== undefined ? lx : sx;
+                        });
+                        merged[k] = subOut;
+                    } else if (serverHasVals) {
+                        merged[k] = sv;
+                    } else {
+                        merged[k] = lv;
+                    }
+                } else if (lv !== '' && lv !== null && lv !== undefined) {
+                    merged[k] = lv;
+                } else if (sv !== undefined) {
+                    merged[k] = sv;
+                } else {
+                    merged[k] = lv;
+                }
+            });
             out[f] = merged;
         });
         // Array fields: union by id — NEVER drop items.
@@ -1234,9 +1315,6 @@ const DB = {
     },
     async _syncRecord(record) {
         try {
-            // Mark as our own write so the realtime echo doesn't disrupt
-            // the form the user is still editing.
-            this._markOwnWrite(record.stationId + '_' + record.date);
             // Ensure session is still valid before syncing
             let { data: { session } } = await supabaseClient.auth.getSession();
             if (!session) {
@@ -1291,8 +1369,13 @@ const DB = {
                     // Nothing changed — nothing to sync
                     return;
                 }
-                delta.updated_at = new Date().toISOString();
+                const ourTs = new Date().toISOString();
+                delta.updated_at = ourTs;
                 delta.updated_by = userId;
+                // Record the exact updated_at as an echo nonce BEFORE sending,
+                // so the realtime event (which always arrives after the HTTP
+                // response) can be matched even if it races back quickly.
+                this._markOwnWrite(record.stationId + '_' + record.date, ourTs);
                 console.log('[Delta Sync] Updating fields:', Object.keys(delta));
                 const { error: updErr } = await supabaseClient
                     .from('daily_records')
@@ -1322,6 +1405,10 @@ const DB = {
                     }
                 }
                 const dbData = this._toDb(recordToUpsert);
+                // Pin updated_at to a single exact value and use it as echo nonce
+                const ourTs = new Date().toISOString();
+                dbData.updated_at = ourTs;
+                this._markOwnWrite(record.stationId + '_' + record.date, ourTs);
                 const { error: upsErr } = await supabaseClient
                     .from('daily_records')
                     .upsert(dbData, { onConflict: 'station_id,record_date' });
@@ -1334,6 +1421,9 @@ const DB = {
                 const { data: retryRefresh } = await supabaseClient.auth.refreshSession();
                 if (retryRefresh.session) {
                     const dbData = this._toDb(record);
+                    const retryTs = new Date().toISOString();
+                    dbData.updated_at = retryTs;
+                    this._markOwnWrite(record.stationId + '_' + record.date, retryTs);
                     const retry = await supabaseClient
                         .from('daily_records')
                         .upsert(dbData, { onConflict: 'station_id,record_date' });
@@ -1349,6 +1439,22 @@ const DB = {
                     window._originalSnapshot = JSON.parse(JSON.stringify(snapshotSrc));
                     window._snapshotFor = { stationId: record.stationId, date: record.date };
                 }
+                // If the user is currently viewing this record on daily-entry,
+                // push the merged result back into formData so sections the form
+                // didn't own (e.g. meter readings from another user) become
+                // visible without waiting for a separate realtime event.
+                try {
+                    if (typeof currentPage !== 'undefined' && currentPage === 'daily-entry'
+                        && typeof reloadFormFromCache === 'function') {
+                        const sidEl = document.getElementById('entryStation');
+                        const dtEl  = document.getElementById('entryDate');
+                        if (sidEl && dtEl
+                            && sidEl.value === record.stationId
+                            && dtEl.value === record.date) {
+                            reloadFormFromCache(record.stationId, record.date);
+                        }
+                    }
+                } catch (e) { console.warn('Post-save form reload failed:', e); }
                 window._lastSyncedRecord = null;
             }
         } catch (e) { console.error('Sync error:', e); }
@@ -2233,10 +2339,102 @@ function renderPage(page) {
     }
 }
 
+// True when the open entry form has unsaved edits versus the snapshot
+// captured at onStationChange time. Also treats a focused input/select inside
+// the form as dirty (user might be mid-typing before onchange fires).
+function _formIsDirty() {
+    if (!window._originalSnapshot || !window._snapshotFor) return false;
+    const sid = document.getElementById('entryStation');
+    const dt  = document.getElementById('entryDate');
+    if (!sid || !dt) return false;
+    if (window._snapshotFor.stationId !== sid.value
+        || window._snapshotFor.date !== dt.value) return false;
+
+    const active = document.activeElement;
+    const entryTabs = document.getElementById('entryTabs');
+    if (active && entryTabs && entryTabs.contains(active)
+        && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT')) {
+        return true;
+    }
+
+    try {
+        return JSON.stringify(formData) !== JSON.stringify(window._originalSnapshot);
+    } catch (e) { return false; }
+}
+
+// Re-seed formData from DB._cache for the currently-open record and re-render
+// the visible sub-tabs. Used by Realtime to pick up another user's save
+// without wiping in-progress edits (caller must gate on !_formIsDirty()).
+function reloadFormFromCache(stationId, date) {
+    const rec = DB.getDailyRecord(stationId, date);
+    if (!rec) return false;
+
+    formData = {
+        meterReadings: rec.meterReadings || {},
+        stockEntries: rec.stockEntries || {},
+        productSales: rec.productSales || [],
+        productStockEntries: rec.productStockEntries || {},
+        taxInvoices: rec.taxInvoices || { abbreviated: [], full: [] },
+        expenses: rec.expenses || [],
+        creditCardEntries: rec.creditCardEntries || [],
+        bluecardEntries: rec.bluecardEntries || [],
+        creditCustomers: rec.creditCustomers || [],
+        finance: {
+            otherIncome: 0, creditSales: 0, creditCardAmt: 0,
+            bluecardAmt: 0, qrTransferAmt: 0, discounts: 0,
+            tradeDiscount: 0,
+            cashDay: 0, cashNight: 0, slipDay: null, slipNight: null,
+            slipCreditCard: null, slipBluecard: null, remark: '',
+            ...(rec.finance || {}),
+        },
+        fuelPrices: hasFuelPrices(rec.fuelPrices) ? rec.fuelPrices : DB.getFuelPricesAsOf(date),
+        internalUsage: rec.internalUsage || [],
+    };
+
+    // Pre-init empty slots for all tanks/meters at this station — same rule as
+    // onStationChange, otherwise renderMeterTab would add slots after snapshot.
+    const allTanks = REF.tanks.filter(t => t.stationId === stationId);
+    allTanks.forEach(tank => {
+        if (!formData.stockEntries[tank.key]) {
+            formData.stockEntries[tank.key] = { openingStock: '', fuelAdded: '', truckCode: '', actualDip: '' };
+        }
+    });
+    const allMeters = REF.meters.filter(m =>
+        REF.tanks.some(t => t.key === m.tankKey && t.stationId === stationId));
+    allMeters.forEach(meter => {
+        if (!formData.meterReadings[meter.id]) {
+            formData.meterReadings[meter.id] = { start: '', end: '' };
+        }
+    });
+
+    // Refresh snapshot so subsequent delta saves don't re-push the just-pulled data
+    window._originalSnapshot = JSON.parse(JSON.stringify(formData));
+    window._snapshotFor = { stationId: stationId, date: date };
+
+    // Re-render the tabs that onStationChange always builds, plus the active one
+    try { renderMeterTab(stationId); } catch (e) {}
+    try { renderStockTab(stationId); } catch (e) {}
+    try { renderProductTab(); } catch (e) {}
+    try { renderProductStockTab(); } catch (e) {}
+    try { renderExpenseTab(); } catch (e) {}
+    const activeBtn = document.querySelector('.sub-tab.active');
+    const activeTab = activeBtn ? activeBtn.dataset.subtab : '';
+    try {
+        if (activeTab === 'creditcard') renderCreditCardTab();
+        else if (activeTab === 'bluecard') renderBluecardTab();
+        else if (activeTab === 'internalusage') renderInternalUsageTab();
+        else if (activeTab === 'summary') renderSummaryTab();
+        else if (activeTab === 'taxinvoice') renderTaxInvoiceTab();
+        else if (activeTab === 'credit') renderCreditTab();
+    } catch (e) {}
+    return true;
+}
+
 // Called by DB._handleRealtimeEvent whenever another user changes data.
-// We re-render the current read-only view so updates appear instantly.
-// For daily-entry we DO NOT re-render (it would wipe the user's in-progress
-// form). Instead we show a small indicator that external changes happened.
+// Re-renders the current view so updates appear instantly. For daily-entry:
+//   - other station/date → skip silently (not visible, cache already updated)
+//   - same record + form clean → auto-reload form from cache
+//   - same record + form dirty → toast the user (don't wipe their edits)
 let _realtimeRefreshPending = false;
 function refreshViewAfterRealtime(table, changedKey) {
     // Debounce: if many events fire rapidly (e.g. bulk upsert), only re-render once
@@ -2247,12 +2445,23 @@ function refreshViewAfterRealtime(table, changedKey) {
         try {
             console.log('[Realtime] 🔄 refreshing view:', currentPage, '(trigger:', table, changedKey, ')');
             if (currentPage === 'daily-entry') {
-                // Don't wipe the form. If the edited record matches the one
-                // currently open, show a toast so the user knows to reload.
                 const sid = document.getElementById('entryStation');
                 const dt  = document.getElementById('entryDate');
-                if (table === 'daily_records' && sid && dt && changedKey === (sid.value + '_' + dt.value)) {
+                const openKey = (sid && dt && sid.value && dt.value) ? (sid.value + '_' + dt.value) : null;
+                // Non-record tables (prices, tax, etc.) during entry: skip — the
+                // open form uses values captured at onStationChange; re-rendering
+                // would wipe in-progress edits.
+                if (table !== 'daily_records') return;
+                // Different record — nothing visible to refresh; cache is already up to date
+                if (!openKey || changedKey !== openKey) return;
+
+                if (_formIsDirty()) {
                     showToast('มีการแก้ไขรายการนี้จาก user อื่น — เปิดใหม่เพื่อดูข้อมูลล่าสุด', 'info');
+                } else {
+                    // Form untouched — safe to silently reload and show the new data
+                    if (reloadFormFromCache(sid.value, dt.value)) {
+                        showToast('ข้อมูลอัปเดตจาก user อื่น', 'info');
+                    }
                 }
                 return;
             }
