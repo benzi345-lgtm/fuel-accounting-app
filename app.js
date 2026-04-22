@@ -1100,7 +1100,7 @@ const DB = {
         }
         this._cache[key] = record;
         this._backupRecords();
-        this._syncRecord(record);
+        return this._syncRecord(record);
     },
     // 3-way merge: compare local changes vs original, merge with server
     // 2-way union merge (no snapshot): never loses entries from either side
@@ -1317,6 +1317,13 @@ const DB = {
         return merged;
     },
     async _syncRecord(record) {
+        // Capture snapshot before any await — Realtime events can mutate
+        // window._originalSnapshot between async gaps, causing _buildDelta to
+        // compare against the wrong baseline and silently skip DB writes.
+        const capturedSnapshot = window._originalSnapshot
+            ? JSON.parse(JSON.stringify(window._originalSnapshot)) : null;
+        const capturedSnapId = window._snapshotFor ? { ...window._snapshotFor } : {};
+
         try {
             // Ensure session is still valid before syncing
             let { data: { session } } = await supabaseClient.auth.getSession();
@@ -1326,7 +1333,7 @@ const DB = {
                 session = refreshData.session;
                 if (!session) {
                     showToast('Session หมดอายุ กรุณาเข้าสู่ระบบใหม่', 'error');
-                    return;
+                    return false;
                 }
             }
 
@@ -1346,18 +1353,19 @@ const DB = {
             let error;
             const userId = (Auth.currentUser && Auth.currentUser.id) || null;
 
-            // Snapshot is only valid if it was taken for THIS record (stationId + date).
-            // Cascade / background saves for other records must not use another record's snapshot.
-            const snapId = window._snapshotFor || {};
-            const snapshotMatches = !!window._originalSnapshot
-                && snapId.stationId === record.stationId
-                && snapId.date === record.date;
+            // Use captured snapshot (not live window._originalSnapshot) to avoid
+            // race with Realtime events that fired during the awaits above.
+            const snapshotMatches = !!capturedSnapshot
+                && capturedSnapId.stationId === record.stationId
+                && capturedSnapId.date === record.date;
+
+            // Declared at outer scope so the RLS retry path can use the merged version.
+            let mergedRecord = record;
 
             if (existsOnServer && snapshotMatches) {
-                // 3-way merge server + local against snapshot to preserve concurrent edits
-                let mergedRecord = record;
+                // 3-way merge server + local against captured snapshot to preserve concurrent edits
                 try {
-                    mergedRecord = this._mergeRecord(record, serverRow, window._originalSnapshot);
+                    mergedRecord = this._mergeRecord(record, serverRow, capturedSnapshot);
                     // Update local cache with merged result so UI reflects concurrent changes
                     this._cache[record.stationId + '_' + record.date] = mergedRecord;
                     this._backupRecords();
@@ -1366,11 +1374,11 @@ const DB = {
                     mergedRecord = record;
                 }
 
-                // DELTA UPDATE: only send fields that changed since snapshot (merged vs snapshot)
-                const delta = this._buildDelta(mergedRecord, window._originalSnapshot);
+                // DELTA UPDATE: only send fields that changed since captured snapshot
+                const delta = this._buildDelta(mergedRecord, capturedSnapshot);
                 if (Object.keys(delta).length === 0) {
-                    // Nothing changed — nothing to sync
-                    return;
+                    // Nothing changed — nothing to sync (not an error)
+                    return true;
                 }
                 const ourTs = new Date().toISOString();
                 delta.updated_at = ourTs;
@@ -1380,13 +1388,29 @@ const DB = {
                 // response) can be matched even if it races back quickly.
                 this._markOwnWrite(record.stationId + '_' + record.date, ourTs);
                 console.log('[Delta Sync] Updating fields:', Object.keys(delta));
-                const { error: updErr } = await supabaseClient
+                // Use .select() to detect 0-row updates — Supabase returns
+                // {data:[], error:null} when WHERE matches nothing (e.g. record
+                // was deleted between fetch and write), which would be a silent loss.
+                const { data: updData, error: updErr } = await supabaseClient
                     .from('daily_records')
                     .update(delta)
                     .eq('station_id', record.stationId)
-                    .eq('record_date', record.date);
-                error = updErr;
-                // Store merged record for snapshot update on success
+                    .eq('record_date', record.date)
+                    .select('station_id');
+                if (!updErr && (!updData || updData.length === 0)) {
+                    // 0 rows updated — record vanished between fetch and write; fall back to upsert
+                    console.warn('[Delta Sync] 0 rows affected, falling back to upsert');
+                    const dbData = this._toDb(mergedRecord);
+                    const fallbackTs = new Date().toISOString();
+                    dbData.updated_at = fallbackTs;
+                    this._markOwnWrite(record.stationId + '_' + record.date, fallbackTs);
+                    const { error: fbErr } = await supabaseClient
+                        .from('daily_records')
+                        .upsert(dbData, { onConflict: 'station_id,record_date' });
+                    error = fbErr;
+                } else {
+                    error = updErr;
+                }
                 if (!error) window._lastSyncedRecord = mergedRecord;
             } else {
                 // Full upsert path: new record, OR snapshot is for a different record
@@ -1399,6 +1423,7 @@ const DB = {
                     try {
                         const merged = this._mergeForUpsert(record, serverRow);
                         recordToUpsert = merged;
+                        mergedRecord = merged; // keep outer var in sync for RLS retry
                         // Reflect merge in local cache for consistency
                         this._cache[record.stationId + '_' + record.date] = merged;
                         this._backupRecords();
@@ -1419,11 +1444,12 @@ const DB = {
                 if (!error) window._lastSyncedRecord = recordToUpsert;
             }
 
-            // Retry once on RLS error after refreshing session
+            // Retry once on RLS error after refreshing session.
+            // Use mergedRecord (not the raw record) so concurrent edits aren't lost.
             if (error && error.message && error.message.includes('row-level security')) {
                 const { data: retryRefresh } = await supabaseClient.auth.refreshSession();
                 if (retryRefresh.session) {
-                    const dbData = this._toDb(record);
+                    const dbData = this._toDb(mergedRecord);
                     const retryTs = new Date().toISOString();
                     dbData.updated_at = retryTs;
                     this._markOwnWrite(record.stationId + '_' + record.date, retryTs);
@@ -1433,34 +1459,43 @@ const DB = {
                     error = retry.error;
                 }
             }
-            if (error) { console.error('Sync failed:', error); showToast('Sync: ' + error.message, 'error'); }
-            else {
-                // Only overwrite the user-visible snapshot if this sync was for the record the user is editing.
-                // Background/cascade saves for OTHER records must not touch the snapshot.
-                if (snapshotMatches || (snapId.stationId === record.stationId && snapId.date === record.date)) {
-                    const snapshotSrc = window._lastSyncedRecord || record;
-                    window._originalSnapshot = JSON.parse(JSON.stringify(snapshotSrc));
-                    window._snapshotFor = { stationId: record.stationId, date: record.date };
-                }
-                // If the user is currently viewing this record on daily-entry,
-                // push the merged result back into formData so sections the form
-                // didn't own (e.g. meter readings from another user) become
-                // visible without waiting for a separate realtime event.
-                try {
-                    if (typeof currentPage !== 'undefined' && currentPage === 'daily-entry'
-                        && typeof reloadFormFromCache === 'function') {
-                        const sidEl = document.getElementById('entryStation');
-                        const dtEl  = document.getElementById('entryDate');
-                        if (sidEl && dtEl
-                            && sidEl.value === record.stationId
-                            && dtEl.value === record.date) {
-                            reloadFormFromCache(record.stationId, record.date);
-                        }
-                    }
-                } catch (e) { console.warn('Post-save form reload failed:', e); }
-                window._lastSyncedRecord = null;
+
+            if (error) {
+                console.error('Sync failed:', error);
+                showToast('Sync: ' + error.message, 'error');
+                return false;
             }
-        } catch (e) { console.error('Sync error:', e); }
+
+            // Success: update snapshot so the next save has the correct baseline.
+            // Use capturedSnapId (not live window._snapshotFor) to guard correctly.
+            if (capturedSnapId.stationId === record.stationId && capturedSnapId.date === record.date) {
+                const snapshotSrc = window._lastSyncedRecord || record;
+                window._originalSnapshot = JSON.parse(JSON.stringify(snapshotSrc));
+                window._snapshotFor = { stationId: record.stationId, date: record.date };
+            }
+            // If the user is currently viewing this record on daily-entry,
+            // push the merged result back into formData so sections the form
+            // didn't own (e.g. meter readings from another user) become
+            // visible without waiting for a separate realtime event.
+            try {
+                if (typeof currentPage !== 'undefined' && currentPage === 'daily-entry'
+                    && typeof reloadFormFromCache === 'function') {
+                    const sidEl = document.getElementById('entryStation');
+                    const dtEl  = document.getElementById('entryDate');
+                    if (sidEl && dtEl
+                        && sidEl.value === record.stationId
+                        && dtEl.value === record.date) {
+                        reloadFormFromCache(record.stationId, record.date);
+                    }
+                }
+            } catch (e) { console.warn('Post-save form reload failed:', e); }
+            window._lastSyncedRecord = null;
+            return true;
+        } catch (e) {
+            console.error('Sync error:', e);
+            showToast('เกิดข้อผิดพลาดระหว่างบันทึก: ' + (e.message || 'กรุณาลองใหม่'), 'error');
+            return false;
+        }
     },
     getAllRecords() {
         return Object.values(this._cache).sort((a, b) => b.date.localeCompare(a.date));
@@ -2299,13 +2334,11 @@ function renderCompareContent() {
 
 // ===== NAVIGATION =====
 function navigateTo(page) {
-    // Auto-save daily entry when navigating AWAY (not when re-entering same page)
+    // Auto-save daily entry when navigating AWAY — silent, no toast (user didn't press save).
+    // _autoSaveBeforeSwitch handles this case: same record build as saveCurrentRecord but
+    // without the success toast or cascade, which are only appropriate for explicit saves.
     if (currentPage === 'daily-entry' && page !== 'daily-entry') {
-        const stationId = document.getElementById('entryStation') && document.getElementById('entryStation').value;
-        const date = document.getElementById('entryDate') && document.getElementById('entryDate').value;
-        if (stationId && date) {
-            saveCurrentRecord();
-        }
+        _autoSaveBeforeSwitch();
     }
     currentPage = page;
     document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
@@ -6470,7 +6503,7 @@ function cascadeUpdateNextDay(stationId, date, savedRecord) {
 }
 
 // ===== SAVE RECORD =====
-function saveCurrentRecord() {
+async function saveCurrentRecord() {
     // FIX #1: Force-commit any pending input edit before reading formData.
     // On mobile Safari the tap on "Save" can fire BEFORE the focused input's
     // `onchange` handler, causing the last-typed value (e.g. amount in credit
@@ -6570,15 +6603,14 @@ function saveCurrentRecord() {
         updatedAt: new Date().toISOString(),
     };
 
-    DB.saveDailyRecord(record);
+    const syncPromise = DB.saveDailyRecord(record);
 
-    // Cascade: update next day's carry-forward values
+    // Cascade runs in background — don't block the UX on it
     cascadeUpdateNextDay(stationId, date, record);
 
-    showToast('บันทึกข้อมูลสำเร็จ');
     editingRecord = null;
 
-    // Auto-advance to next sub-tab
+    // Auto-advance to next sub-tab immediately — don't wait for the DB round-trip
     const tabOrder = ['meters', 'stock', 'products', 'productstock', 'expenses', 'creditcard', 'bluecard', 'internalusage', 'credit', 'summary', 'taxinvoice'];
     const activeBtn = document.querySelector('.sub-tab.active');
     if (activeBtn) {
@@ -6593,6 +6625,11 @@ function saveCurrentRecord() {
             }
         }
     }
+
+    // Toast fires only after the DB write confirms — accurate feedback.
+    // _syncRecord shows its own error toast when ok === false.
+    const ok = await syncPromise;
+    if (ok) showToast('บันทึกข้อมูลสำเร็จ');
 }
 
 // ===== HISTORY PAGE =====
