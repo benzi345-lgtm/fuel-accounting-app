@@ -575,6 +575,9 @@ const DB = {
             fuelPrices: row.fuel_prices || {},
             internalUsage: toArr(row.internal_usage),
             updatedAt: row.updated_at,
+            updatedBy: row.updated_by,
+            auditedAt: row.audited_at,
+            auditedBy: row.audited_by,
         };
     },
     // Build delta object: only fields that differ from snapshot
@@ -2317,6 +2320,7 @@ function navigateTo(page) {
         'reference': 'ข้อมูลอ้างอิง',
         'credit-summary': 'ลูกหนี้เงินเชื่อ',
         'tax-reports': 'รายงานภาษี',
+        'audit': 'ตรวจสอบงาน',
         'user-management': 'จัดการผู้ใช้',
     };
     document.getElementById('pageTitle').textContent = titles[page] || '';
@@ -2335,6 +2339,7 @@ function renderPage(page) {
         case 'reference': renderReference(el); break;
         case 'credit-summary': renderCreditSummary(el); break;
         case 'tax-reports': renderTaxReports(el); break;
+        case 'audit': renderAudit(el); break;
         case 'user-management': renderUserManagement(el); break;
     }
 }
@@ -6920,6 +6925,8 @@ function showApp() {
     // Show/hide admin-only menu
     const umLink = document.querySelector('[data-page="user-management"]');
     if (umLink) umLink.closest('li').style.display = Auth.isAdmin() ? '' : 'none';
+    const auditLink = document.querySelector('[data-page="audit"]');
+    if (auditLink) auditLink.closest('li').style.display = Auth.isAdmin() ? '' : 'none';
 
     // Navigation
     document.querySelectorAll('.nav-link').forEach(link => {
@@ -9890,4 +9897,432 @@ function generateReportC(stationId, yearMonth) {
 
     html += `</tbody></table></div>`;
     return html;
+}
+
+// ===== AUDIT PAGE (admin-only) =====
+// Lets the auditor see a per-station summary of the day's entries, drill into
+// a read-only detail view, and flag a record as "ตรวจแล้ว". Audit status is
+// stored on daily_records.audited_at / audited_by (see add-audit-columns.sql).
+
+window.auditState = window.auditState || {
+    date: '',
+    stationFilter: '',
+    view: 'list',
+    detailStation: '',
+    detailDate: '',
+};
+// id → display_name lookup, populated lazily on first render
+window._auditUserNames = window._auditUserNames || null;
+
+async function loadAuditUserNames() {
+    if (window._auditUserNames) return window._auditUserNames;
+    try {
+        const { data } = await supabaseClient
+            .from('user_profiles')
+            .select('id,email,display_name');
+        const map = {};
+        (data || []).forEach(u => {
+            map[u.id] = u.display_name || u.email || u.id;
+        });
+        window._auditUserNames = map;
+    } catch (e) {
+        window._auditUserNames = {};
+    }
+    return window._auditUserNames;
+}
+
+function lookupUserName(userId) {
+    if (!userId) return '—';
+    const map = window._auditUserNames || {};
+    return map[userId] || userId.slice(0, 8);
+}
+
+// Returns { sections: [{name, filled, total}], summary: '...' }
+function computeAuditCompletion(record, stationId) {
+    const sections = [];
+
+    var meterTanks = REF.tanks.filter(function (t) { return t.stationId === stationId; });
+    var meterIds = REF.meters.filter(function (m) {
+        return meterTanks.some(function (t) { return t.key === m.tankKey; });
+    });
+    var meterFilled = 0;
+    if (record && record.meterReadings) {
+        meterIds.forEach(function (m) {
+            var r = record.meterReadings[m.id];
+            if (r && r.end !== '' && r.end !== null && r.end !== undefined) meterFilled++;
+        });
+    }
+    sections.push({ name: 'มิเตอร์', filled: meterFilled, total: meterIds.length });
+
+    var tanksAtStation = meterTanks;
+    var stockFilled = 0;
+    if (record && record.stockEntries) {
+        tanksAtStation.forEach(function (t) {
+            var s = record.stockEntries[t.key];
+            if (s && s.actualDip !== '' && s.actualDip !== null && s.actualDip !== undefined) stockFilled++;
+        });
+    }
+    sections.push({ name: 'สต็อก', filled: stockFilled, total: tanksAtStation.length });
+
+    sections.push({ name: 'ขาย', filled: (record && record.productSales || []).length > 0 ? 1 : 0, total: 1 });
+    sections.push({ name: 'เครดิต', filled: (record && record.creditCustomers || []).length > 0 ? 1 : 0, total: 1 });
+
+    var f = (record && record.finance) || {};
+    var financeFilled = (parseNum(f.actualCashSent) > 0 || parseNum(f.fuelSalesValue) > 0
+        || parseNum(f.cashDay) > 0 || parseNum(f.cashNight) > 0) ? 1 : 0;
+    sections.push({ name: 'การเงิน', filled: financeFilled, total: 1 });
+
+    var summary = sections.map(function (s) {
+        var ok = s.filled >= s.total && s.total > 0;
+        return '<span style="color:' + (ok ? '#16a34a' : '#999') + '">'
+            + s.name + ' ' + s.filled + '/' + s.total + '</span>';
+    }).join(' · ');
+
+    return { sections: sections, summary: summary };
+}
+
+// 'audited' | 'modified' | 'pending' | 'none'
+function computeAuditStatus(record) {
+    if (!record) return 'none';
+    if (!record.auditedAt) return 'pending';
+    if (record.updatedAt && new Date(record.updatedAt) > new Date(record.auditedAt)) return 'modified';
+    return 'audited';
+}
+
+function formatRelativeTime(isoStr) {
+    if (!isoStr) return '—';
+    var d = new Date(isoStr);
+    var diffMs = Date.now() - d.getTime();
+    var diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return 'ไม่กี่วินาทีที่แล้ว';
+    if (diffMin < 60) return diffMin + ' นาทีที่แล้ว';
+    var diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return diffHr + ' ชั่วโมงที่แล้ว';
+    var diffDay = Math.floor(diffHr / 24);
+    if (diffDay < 7) return diffDay + ' วันที่แล้ว';
+    return d.toLocaleDateString('th-TH');
+}
+
+async function renderAudit(el) {
+    if (!Auth.isAdmin()) {
+        el.innerHTML = '<div class="card" style="padding:40px;text-align:center"><h3>ไม่มีสิทธิ์เข้าถึง</h3><p>เฉพาะผู้ดูแลระบบเท่านั้น</p></div>';
+        return;
+    }
+    if (!auditState.date) auditState.date = todayStr();
+    await loadAuditUserNames();
+    if (auditState.view === 'detail' && auditState.detailStation && auditState.detailDate) {
+        renderAuditDetail(el, auditState.detailStation, auditState.detailDate);
+    } else {
+        renderAuditList(el);
+    }
+}
+
+function renderAuditList(el) {
+    var date = auditState.date;
+    var filter = auditState.stationFilter || '';
+    var stations = filter ? REF.stations.filter(function (s) { return s.id === filter; }) : REF.stations;
+
+    var summary = { audited: 0, modified: 0, pending: 0, none: 0 };
+    var rowsHtml = '';
+
+    stations.forEach(function (s) {
+        var rec = DB.getDailyRecord(s.id, date);
+        var completion = computeAuditCompletion(rec, s.id);
+        var status = computeAuditStatus(rec);
+        summary[status]++;
+
+        var bgColor = status === 'audited' ? '#dcfce7'
+            : status === 'modified' ? '#fef3c7'
+            : status === 'none' ? '#fee2e2'
+            : '#fff';
+
+        var statusBadge = status === 'audited' ? '<span style="color:#15803d;font-weight:600">✅ ตรวจแล้ว</span>'
+            : status === 'modified' ? '<span style="color:#b45309;font-weight:600">⚠️ มีแก้ไขหลังตรวจ</span>'
+            : status === 'pending' ? '<span style="color:#666">⏳ ยังไม่ตรวจ</span>'
+            : '<span style="color:#b91c1c">❌ ยังไม่บันทึก</span>';
+
+        var updaterName = rec ? lookupUserName(rec.updatedBy) : '—';
+        var updatedTime = rec ? formatRelativeTime(rec.updatedAt) : '—';
+
+        rowsHtml += '<tr style="background:' + bgColor + ';cursor:pointer" '
+            + 'onclick="openAuditDetail(\'' + s.id + '\',\'' + date + '\')" '
+            + 'onmouseover="this.style.filter=\'brightness(0.96)\'" '
+            + 'onmouseout="this.style.filter=\'\'">'
+            + '<td><strong>' + s.name + '</strong></td>'
+            + '<td>' + updaterName + '</td>'
+            + '<td>' + updatedTime + '</td>'
+            + '<td style="font-size:13px">' + (rec ? completion.summary : '—') + '</td>'
+            + '<td>' + statusBadge + '</td>'
+            + '</tr>';
+    });
+
+    var summaryBar = '<div style="display:flex;gap:12px;flex-wrap:wrap;margin:8px 0;font-size:13px">'
+        + '<span>✅ ตรวจแล้ว: <strong>' + summary.audited + '</strong></span>'
+        + '<span>⚠️ มีแก้หลังตรวจ: <strong>' + summary.modified + '</strong></span>'
+        + '<span>⏳ ยังไม่ตรวจ: <strong>' + summary.pending + '</strong></span>'
+        + '<span>❌ ยังไม่บันทึก: <strong>' + summary.none + '</strong></span>'
+        + '</div>';
+
+    var html = '<div class="card" style="padding:20px;margin-bottom:16px">'
+        + '<h3 style="margin:0 0 12px 0">ตรวจสอบงานประจำวัน</h3>'
+        + '<div class="form-row">'
+        + '  <div class="form-group" style="max-width:240px">'
+        + '    <label>วันที่</label>'
+        + '    ' + thaiDateInput('auditDate', date, "auditState.date=this.value;renderPage('audit')")
+        + '  </div>'
+        + '  <div class="form-group" style="max-width:240px">'
+        + '    <label>สาขา</label>'
+        + '    <select onchange="auditState.stationFilter=this.value;renderPage(\'audit\')">'
+        + '      <option value="">ทุกสาขา</option>'
+        + REF.stations.map(function (s) {
+            return '<option value="' + s.id + '"' + (s.id === filter ? ' selected' : '') + '>' + s.name + '</option>';
+        }).join('')
+        + '    </select>'
+        + '  </div>'
+        + '</div>'
+        + summaryBar
+        + '</div>'
+        + '<div class="card" style="padding:0;overflow-x:auto">'
+        + '<table class="data-table" style="width:100%;border-collapse:collapse">'
+        + '<thead><tr style="background:#f8fafc">'
+        + '<th style="text-align:left;padding:12px">สาขา</th>'
+        + '<th style="text-align:left;padding:12px">ผู้บันทึกล่าสุด</th>'
+        + '<th style="text-align:left;padding:12px">บันทึกเมื่อ</th>'
+        + '<th style="text-align:left;padding:12px">ความครบถ้วน</th>'
+        + '<th style="text-align:left;padding:12px">สถานะตรวจสอบ</th>'
+        + '</tr></thead>'
+        + '<tbody>' + rowsHtml + '</tbody>'
+        + '</table>'
+        + '</div>';
+
+    el.innerHTML = html;
+}
+
+function openAuditDetail(stationId, date) {
+    auditState.view = 'detail';
+    auditState.detailStation = stationId;
+    auditState.detailDate = date;
+    renderPage('audit');
+}
+
+function backToAuditList() {
+    auditState.view = 'list';
+    auditState.detailStation = '';
+    auditState.detailDate = '';
+    renderPage('audit');
+}
+
+async function markRecordAudited(stationId, date) {
+    if (!Auth.isAdmin()) return;
+    var userId = (Auth.currentUser && Auth.currentUser.id) || null;
+    var ts = new Date().toISOString();
+    var res = await supabaseClient
+        .from('daily_records')
+        .update({ audited_at: ts, audited_by: userId })
+        .eq('station_id', stationId)
+        .eq('record_date', date);
+    if (res.error) {
+        showToast('บันทึกการตรวจไม่สำเร็จ: ' + res.error.message, 'error');
+        return;
+    }
+    var key = stationId + '_' + date;
+    if (DB._cache[key]) {
+        DB._cache[key].auditedAt = ts;
+        DB._cache[key].auditedBy = userId;
+        DB._backupRecords();
+    }
+    showToast('บันทึกว่าตรวจแล้ว', 'success');
+    renderPage('audit');
+}
+
+async function unmarkRecordAudited(stationId, date) {
+    if (!Auth.isAdmin()) return;
+    var res = await supabaseClient
+        .from('daily_records')
+        .update({ audited_at: null, audited_by: null })
+        .eq('station_id', stationId)
+        .eq('record_date', date);
+    if (res.error) {
+        showToast('ยกเลิกการตรวจไม่สำเร็จ: ' + res.error.message, 'error');
+        return;
+    }
+    var key = stationId + '_' + date;
+    if (DB._cache[key]) {
+        DB._cache[key].auditedAt = null;
+        DB._cache[key].auditedBy = null;
+        DB._backupRecords();
+    }
+    showToast('ยกเลิกการตรวจแล้ว', 'success');
+    renderPage('audit');
+}
+
+function renderAuditDetail(el, stationId, date) {
+    var rec = DB.getDailyRecord(stationId, date);
+    var stationName = getStationName(stationId);
+    var dateThai = formatDateThaiFull(date);
+
+    var headerCard = '<div class="card" style="padding:20px;margin-bottom:16px">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">'
+        + '<button class="btn btn-outline" onclick="backToAuditList()">← กลับ</button>';
+
+    if (rec) {
+        var status = computeAuditStatus(rec);
+        var actionBtn = (status === 'audited' || status === 'modified')
+            ? '<button class="btn btn-outline" onclick="unmarkRecordAudited(\'' + stationId + '\',\'' + date + '\')">↻ ยกเลิกการตรวจ</button>'
+                + ' <button class="btn btn-success" onclick="markRecordAudited(\'' + stationId + '\',\'' + date + '\')">✅ ตรวจอีกครั้ง</button>'
+            : '<button class="btn btn-success" onclick="markRecordAudited(\'' + stationId + '\',\'' + date + '\')">✅ ตรวจแล้ว</button>';
+        headerCard += '<div>' + actionBtn + '</div>';
+    } else {
+        headerCard += '<div></div>';
+    }
+
+    headerCard += '</div>'
+        + '<h2 style="margin:16px 0 4px 0">' + stationName + '</h2>'
+        + '<p style="color:#666;margin:0">' + dateThai + '</p>';
+
+    if (rec) {
+        var updaterName = lookupUserName(rec.updatedBy);
+        var updatedAt = rec.updatedAt ? new Date(rec.updatedAt).toLocaleString('th-TH') : '—';
+        headerCard += '<p style="color:#666;margin:4px 0 0 0">บันทึกล่าสุดโดย: <strong>' + updaterName
+            + '</strong> เมื่อ ' + updatedAt + '</p>';
+        var st = computeAuditStatus(rec);
+        if (st === 'audited') {
+            headerCard += '<p style="color:#15803d;margin:4px 0 0 0;font-weight:600">✅ ตรวจแล้วเมื่อ '
+                + new Date(rec.auditedAt).toLocaleString('th-TH')
+                + ' โดย ' + lookupUserName(rec.auditedBy) + '</p>';
+        } else if (st === 'modified') {
+            headerCard += '<p style="color:#b45309;margin:4px 0 0 0;font-weight:600">⚠️ มีการแก้ไขหลังจากตรวจ — ตรวจครั้งล่าสุดเมื่อ '
+                + new Date(rec.auditedAt).toLocaleString('th-TH')
+                + ' โดย ' + lookupUserName(rec.auditedBy) + '</p>';
+        }
+    }
+    headerCard += '</div>';
+
+    if (!rec) {
+        el.innerHTML = headerCard
+            + '<div class="card" style="padding:40px;text-align:center;color:#666">'
+            + 'ยังไม่มีการบันทึกข้อมูลในวันนี้'
+            + '</div>';
+        return;
+    }
+
+    var html = headerCard;
+    var completion = computeAuditCompletion(rec, stationId);
+
+    // --- Meter section ---
+    var meterTanks = REF.tanks.filter(function (t) { return t.stationId === stationId; });
+    var meters = REF.meters.filter(function (m) {
+        return meterTanks.some(function (t) { return t.key === m.tankKey; });
+    });
+    html += '<div class="card" style="padding:20px;margin-bottom:16px">'
+        + '<h3 style="margin:0 0 12px 0">มิเตอร์ <span style="font-weight:400;color:#666;font-size:14px">('
+        + completion.sections[0].filled + '/' + completion.sections[0].total + ')</span></h3>';
+    if (meters.length > 0) {
+        html += '<table class="data-table" style="width:100%;border-collapse:collapse">'
+            + '<thead><tr style="background:#f8fafc">'
+            + '<th style="padding:8px;text-align:left">มิเตอร์</th>'
+            + '<th style="padding:8px;text-align:left">เชื้อเพลิง</th>'
+            + '<th style="padding:8px;text-align:right">เริ่มต้น</th>'
+            + '<th style="padding:8px;text-align:right">สิ้นสุด</th>'
+            + '<th style="padding:8px;text-align:right">ลิตรขาย</th>'
+            + '</tr></thead><tbody>';
+        meters.forEach(function (m) {
+            var tank = REF.tanks.find(function (t) { return t.key === m.tankKey; });
+            var r = (rec.meterReadings || {})[m.id] || {};
+            var startN = parseNum(r.start);
+            var endN = parseNum(r.end);
+            var sold = (endN > 0 && startN > 0 && endN >= startN) ? fmt(endN - startN) : '—';
+            html += '<tr>'
+                + '<td style="padding:8px">' + (m.label || m.id) + '</td>'
+                + '<td style="padding:8px">' + (tank ? tank.fuelType : '—') + '</td>'
+                + '<td style="padding:8px;text-align:right">' + (r.start || '—') + '</td>'
+                + '<td style="padding:8px;text-align:right">' + (r.end || '—') + '</td>'
+                + '<td style="padding:8px;text-align:right">' + sold + '</td>'
+                + '</tr>';
+        });
+        html += '</tbody></table>';
+    }
+    html += '</div>';
+
+    // --- Stock section ---
+    html += '<div class="card" style="padding:20px;margin-bottom:16px">'
+        + '<h3 style="margin:0 0 12px 0">สต็อก <span style="font-weight:400;color:#666;font-size:14px">('
+        + completion.sections[1].filled + '/' + completion.sections[1].total + ')</span></h3>';
+    if (meterTanks.length > 0) {
+        html += '<table class="data-table" style="width:100%;border-collapse:collapse">'
+            + '<thead><tr style="background:#f8fafc">'
+            + '<th style="padding:8px;text-align:left">ถัง</th>'
+            + '<th style="padding:8px;text-align:left">เชื้อเพลิง</th>'
+            + '<th style="padding:8px;text-align:right">ยอดต้นวัน</th>'
+            + '<th style="padding:8px;text-align:right">เติมน้ำมัน</th>'
+            + '<th style="padding:8px;text-align:right">วัดจริง (Dip)</th>'
+            + '</tr></thead><tbody>';
+        meterTanks.forEach(function (t) {
+            var s = (rec.stockEntries || {})[t.key] || {};
+            html += '<tr>'
+                + '<td style="padding:8px">' + (t.label || t.key) + '</td>'
+                + '<td style="padding:8px">' + t.fuelType + '</td>'
+                + '<td style="padding:8px;text-align:right">' + (s.openingStock || '—') + '</td>'
+                + '<td style="padding:8px;text-align:right">' + (s.fuelAdded || '—') + '</td>'
+                + '<td style="padding:8px;text-align:right">' + (s.actualDip || '—') + '</td>'
+                + '</tr>';
+        });
+        html += '</tbody></table>';
+    }
+    html += '</div>';
+
+    // --- Sales / credit / expenses summary cards (counts + totals) ---
+    var sales = rec.productSales || [];
+    var salesTotal = sales.reduce(function (a, p) { return a + parseNum(p.total || (parseNum(p.quantity) * parseNum(p.price))); }, 0);
+    var credits = rec.creditCustomers || [];
+    var creditsTotal = credits.reduce(function (a, c) { return a + parseNum(c.amount || c.total); }, 0);
+    var expenses = rec.expenses || [];
+    var expensesTotal = expenses.reduce(function (a, e) { return a + parseNum(e.amount); }, 0);
+
+    html += '<div class="card" style="padding:20px;margin-bottom:16px">'
+        + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px">'
+        + '<div><div style="color:#666;font-size:13px">ขายสินค้า</div>'
+        + '<div style="font-size:20px;font-weight:600">' + sales.length + ' รายการ</div>'
+        + '<div style="color:#666">รวม ' + fmt(salesTotal) + ' บาท</div></div>'
+        + '<div><div style="color:#666;font-size:13px">ขายเชื่อ</div>'
+        + '<div style="font-size:20px;font-weight:600">' + credits.length + ' รายการ</div>'
+        + '<div style="color:#666">รวม ' + fmt(creditsTotal) + ' บาท</div></div>'
+        + '<div><div style="color:#666;font-size:13px">ค่าใช้จ่าย</div>'
+        + '<div style="font-size:20px;font-weight:600">' + expenses.length + ' รายการ</div>'
+        + '<div style="color:#666">รวม ' + fmt(expensesTotal) + ' บาท</div></div>'
+        + '</div></div>';
+
+    if (expenses.length > 0) {
+        html += '<div class="card" style="padding:20px;margin-bottom:16px">'
+            + '<h3 style="margin:0 0 12px 0">รายการค่าใช้จ่าย</h3>'
+            + '<table class="data-table" style="width:100%;border-collapse:collapse">'
+            + '<thead><tr style="background:#f8fafc">'
+            + '<th style="padding:8px;text-align:left">รายการ</th>'
+            + '<th style="padding:8px;text-align:right">จำนวนเงิน</th>'
+            + '</tr></thead><tbody>';
+        expenses.forEach(function (e) {
+            html += '<tr>'
+                + '<td style="padding:8px">' + (e.description || e.note || e.detail || '—') + '</td>'
+                + '<td style="padding:8px;text-align:right">' + fmt(parseNum(e.amount)) + '</td>'
+                + '</tr>';
+        });
+        html += '</tbody></table></div>';
+    }
+
+    // --- Finance summary ---
+    var f = rec.finance || {};
+    html += '<div class="card" style="padding:20px;margin-bottom:16px">'
+        + '<h3 style="margin:0 0 12px 0">การเงิน</h3>'
+        + '<table class="data-table" style="width:100%;border-collapse:collapse">'
+        + '<tr><td style="padding:8px;color:#666">ยอดขายน้ำมัน (มูลค่า)</td>'
+        + '<td style="padding:8px;text-align:right">' + fmt(parseNum(f.fuelSalesValue)) + ' บาท</td></tr>'
+        + '<tr><td style="padding:8px;color:#666">เงินสดวันที่ส่งจริง</td>'
+        + '<td style="padding:8px;text-align:right">' + fmt(parseNum(f.actualCashSent)) + ' บาท</td></tr>'
+        + '<tr><td style="padding:8px;color:#666">เงินสด (กลางวัน + กลางคืน)</td>'
+        + '<td style="padding:8px;text-align:right">' + fmt(parseNum(f.cashDay) + parseNum(f.cashNight)) + ' บาท</td></tr>'
+        + '<tr><td style="padding:8px;color:#666">หมายเหตุ</td>'
+        + '<td style="padding:8px;text-align:right">' + (f.remark || '—') + '</td></tr>'
+        + '</table></div>';
+
+    el.innerHTML = html;
 }
