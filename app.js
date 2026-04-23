@@ -1005,7 +1005,15 @@ const DB = {
     },
     _isOwnEcho(key, updatedAt) {
         if (!updatedAt || !this._ownWrites || !this._ownWrites[key]) return false;
-        return !!this._ownWrites[key][updatedAt];
+        // Normalise to epoch ms before comparing: Supabase Realtime delivers
+        // updated_at in Postgres format ("2026-04-23 10:30:00.123456+00") while
+        // the client nonce is ISO-Z ("2026-04-23T10:30:00.123Z"). String equality
+        // would always fail, causing echoes to leak through and trigger refreshes.
+        const incomingMs = new Date(updatedAt).getTime();
+        if (!incomingMs) return false;
+        return Object.keys(this._ownWrites[key]).some(function (ts) {
+            return Math.abs(new Date(ts).getTime() - incomingMs) < 10;
+        });
     },
     _handleRealtimeEvent(table, payload) {
         const eventType = payload.eventType || payload.type;
@@ -1025,6 +1033,16 @@ const DB = {
                 const k = rec.stationId + '_' + rec.date;
                 // Skip echo of our own recent write (matched by exact updated_at nonce)
                 if (this._isOwnEcho(k, newRow.updated_at)) return;
+                // Skip stale events: Realtime replays on reconnect can deliver
+                // old events whose updated_at is earlier than what we already have.
+                // Applying them would overwrite newer data with old data.
+                const cached = this._cache[k];
+                if (cached && cached.updatedAt && newRow.updated_at
+                    && newRow.updated_at < cached.updatedAt) {
+                    console.log('[Realtime] Ignoring stale event for', k,
+                        '(event:', newRow.updated_at, '< cache:', cached.updatedAt, ')');
+                    return;
+                }
                 this._cache[k] = rec;
                 changedKey = k;
             }
@@ -1474,9 +1492,12 @@ const DB = {
                 window._snapshotFor = { stationId: record.stationId, date: record.date };
             }
             // If the user is currently viewing this record on daily-entry,
-            // push the merged result back into formData so sections the form
-            // didn't own (e.g. meter readings from another user) become
-            // visible without waiting for a separate realtime event.
+            // If the 3-way merge brought in changes from another user (mergedRecord
+            // differs from what this client saved), push them into formData so the
+            // form reflects the concurrent edit without waiting for a Realtime event.
+            // Skip when nothing changed — avoids replacing meter input DOM elements
+            // unnecessarily, which was causing perceived data loss (inputs cleared
+            // mid-interaction when innerHTML was replaced with identical content).
             try {
                 if (typeof currentPage !== 'undefined' && currentPage === 'daily-entry'
                     && typeof reloadFormFromCache === 'function') {
@@ -1485,7 +1506,11 @@ const DB = {
                     if (sidEl && dtEl
                         && sidEl.value === record.stationId
                         && dtEl.value === record.date) {
-                        reloadFormFromCache(record.stationId, record.date);
+                        const mergedDiffersFromSaved =
+                            JSON.stringify(mergedRecord) !== JSON.stringify(record);
+                        if (mergedDiffersFromSaved) {
+                            reloadFormFromCache(record.stationId, record.date);
+                        }
                     }
                 }
             } catch (e) { console.warn('Post-save form reload failed:', e); }
@@ -2340,6 +2365,9 @@ function navigateTo(page) {
     if (currentPage === 'daily-entry' && page !== 'daily-entry') {
         _autoSaveBeforeSwitch();
     }
+    if (currentPage === 'history' && page !== 'history') {
+        historyState.stationFilter = '';
+    }
     currentPage = page;
     document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
     const link = document.querySelector(`[data-page="${page}"]`);
@@ -2510,7 +2538,21 @@ function refreshViewAfterRealtime(table, changedKey) {
                 if (typeof renderDashboardCharts === 'function') renderDashboardCharts();
                 return;
             }
-            // Other pages: full re-render is safe
+            // Other pages: only re-render when the changed table actually affects
+            // what the page displays. Without this guard every Realtime event from
+            // any of the 6 subscribed tables (fuel_prices, credit_payments, etc.)
+            // would cause a full page rebuild — the visible "constant auto-refresh".
+            const _pageTableMap = {
+                'history':        ['daily_records'],
+                'compare':        ['daily_records'],
+                'audit':          ['daily_records'],
+                'credit-summary': ['daily_records', 'credit_payments', 'custom_credit_customers'],
+                'tax-reports':    ['daily_records', 'tax_entries'],
+                'reference':      ['fuel_prices'],
+                'user-management': [],
+            };
+            const _relevant = _pageTableMap[currentPage];
+            if (_relevant !== undefined && !_relevant.includes(table)) return;
             renderPage(currentPage);
         } catch (e) { console.warn('[Realtime] refresh failed:', e); }
     }, 200);
@@ -6658,8 +6700,12 @@ function isRecordComplete(record) {
     return false;
 }
 
+var historyState = { stationFilter: '' };
+
 function renderHistory(el) {
-    const records = DB.getAllRecords().filter(isRecordComplete);
+    var filter = historyState.stationFilter;
+    var allRecords = DB.getAllRecords().filter(isRecordComplete);
+    var records = filter ? allRecords.filter(function(r) { return r.stationId === filter; }) : allRecords;
 
     let html = `<div class="card">
         <div class="card-header">
@@ -6670,7 +6716,7 @@ function renderHistory(el) {
                 <label>ค้นหาสาขา</label>
                 <select id="historyFilter" onchange="filterHistory()">
                     <option value="">ทุกสาขา</option>
-                    ${REF.stations.map(s => `<option value="${s.id}">${s.name}</option>`).join('')}
+                    ${REF.stations.map(s => `<option value="${s.id}"${filter === s.id ? ' selected' : ''}>${s.name}</option>`).join('')}
                 </select>
             </div>
         </div>
@@ -6726,6 +6772,7 @@ function renderHistoryRows(records) {
 
 function filterHistory() {
     const filter = document.getElementById('historyFilter').value;
+    historyState.stationFilter = filter;
     const records = DB.getAllRecords().filter(r => isRecordComplete(r) && (!filter || r.stationId === filter));
     document.getElementById('historyBody').innerHTML = renderHistoryRows(records);
 }
