@@ -730,12 +730,13 @@ const DB = {
             if (serverRec.taxInvoices) merged.taxInvoices = serverRec.taxInvoices;
         }
 
-        // finance: local wins per-field but only when local value is non-empty
+        // finance: local wins per-field but only when local value is non-empty.
+        // Treat numeric 0 as "empty" — a local cashDay=0 default must not wipe server's real value.
         const finL = local.finance || {}, finS = serverRec.finance || {};
         const finOut = {};
         Object.keys(finS).forEach(function (k) { finOut[k] = finS[k]; });
         Object.keys(finL).forEach(function (k) {
-            if (finL[k] !== undefined && finL[k] !== '' && finL[k] !== null) finOut[k] = finL[k];
+            if (finL[k] !== undefined && finL[k] !== '' && finL[k] !== null && finL[k] !== 0) finOut[k] = finL[k];
         });
         merged.finance = finOut;
 
@@ -1200,11 +1201,13 @@ const DB = {
             S.forEach(function (it, i) { var k = keyFor(it, i); if (!seen[k]) { seen[k] = 1; union.push(it); } });
             out[f] = union;
         });
-        // Finance: local wins field-by-field (more recent edits), preserve server fields if local missing
+        // Finance: local wins field-by-field (more recent edits), preserve server fields if local missing.
+        // Treat numeric 0 as "empty" so a stale local default (cashDay=0) never overwrites a real server
+        // value (cashDay=500). The 3-way _mergeRecord handles intentional zeroing correctly via snapshot.
         var finL = local.finance || {}, finS = server.finance || {};
         var finOut = {};
         Object.keys(finS).forEach(function (k) { finOut[k] = finS[k]; });
-        Object.keys(finL).forEach(function (k) { if (finL[k] !== undefined && finL[k] !== '' && finL[k] !== null) finOut[k] = finL[k]; });
+        Object.keys(finL).forEach(function (k) { if (finL[k] !== undefined && finL[k] !== '' && finL[k] !== null && finL[k] !== 0) finOut[k] = finL[k]; });
         out.finance = finOut;
         return out;
     },
