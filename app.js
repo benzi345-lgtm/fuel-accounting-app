@@ -4111,7 +4111,9 @@ function onStationChange(existingRecord) {
         formData.fuelPrices = _d ? DB.getFuelPricesAsOf(_d) : DB.getFuelPrices();
     }
 
-    // Always sync meter start from previous day's end (ensure continuity)
+    // Sync meter start from previous day's end — only when start is currently empty.
+    // Do NOT overwrite an existing start value: that would corrupt historical records
+    // (the "always overwrite" version was the root cause of the 1-billion-baht meter bug).
     {
         const currentDate = document.getElementById('entryDate').value;
         const prevData = getPreviousDayData(stationId, currentDate);
@@ -4122,12 +4124,16 @@ function onStationChange(existingRecord) {
                     if (!formData.meterReadings[meterId]) {
                         formData.meterReadings[meterId] = { start: prevStart, end: '' };
                     } else {
-                        formData.meterReadings[meterId].start = prevStart;
+                        // Only fill in if start is currently empty — never overwrite saved data
+                        const cur = formData.meterReadings[meterId].start;
+                        if (cur === '' || cur === null || cur === undefined) {
+                            formData.meterReadings[meterId].start = prevStart;
+                        }
                     }
                 }
             });
         }
-        // Also sync stock opening from previous day
+        // Also sync stock opening from previous day — same rule: only fill empty slots
         if (prevData.stockEntries && Object.keys(prevData.stockEntries).length > 0) {
             Object.keys(prevData.stockEntries).forEach(tankKey => {
                 const prevOpening = prevData.stockEntries[tankKey].openingStock;
@@ -4135,27 +4141,31 @@ function onStationChange(existingRecord) {
                     if (!formData.stockEntries[tankKey]) {
                         formData.stockEntries[tankKey] = { openingStock: prevOpening, fuelAdded: '', actualDip: '' };
                     } else {
-                        formData.stockEntries[tankKey].openingStock = prevOpening;
+                        const curOpening = formData.stockEntries[tankKey].openingStock;
+                        if (curOpening === '' || curOpening === null || curOpening === undefined) {
+                            formData.stockEntries[tankKey].openingStock = prevOpening;
+                        }
                     }
                 }
             });
         }
     }
 
-    // Always sync product stock openingStock from previous day (ensure continuity)
+    // Sync product stock openingStock from previous day — only fill empty slots
     {
         const currentDate = document.getElementById('entryDate').value;
         const prevData = getPreviousDayData(stationId, currentDate);
         if (Object.keys(prevData.productStockEntries).length > 0) {
             const currentEntries = formData.productStockEntries || {};
-            // For each product in previous day's carry-over
             Object.keys(prevData.productStockEntries).forEach(productId => {
                 const prevEntry = prevData.productStockEntries[productId];
                 if (currentEntries[productId]) {
-                    // Update openingStock to match previous day's balance
-                    currentEntries[productId].openingStock = prevEntry.openingStock;
+                    // Only update if currently empty — do not overwrite saved historical value
+                    const curOpening = currentEntries[productId].openingStock;
+                    if (curOpening === '' || curOpening === null || curOpening === undefined) {
+                        currentEntries[productId].openingStock = prevEntry.openingStock;
+                    }
                 } else {
-                    // Product not in current record yet — add it
                     currentEntries[productId] = { openingStock: prevEntry.openingStock, received: '', actualCount: '' };
                 }
             });
@@ -6488,8 +6498,10 @@ function cascadeUpdateNextDay(stationId, date, savedRecord) {
         const next = new Date(d);
         next.setDate(next.getDate() + i);
         const nextStr = next.toISOString().split('T')[0];
-        const nextRecord = DB.getDailyRecord(stationId, nextStr);
-        if (nextRecord) {
+        const nextRecordRaw = DB.getDailyRecord(stationId, nextStr);
+        if (nextRecordRaw) {
+            // Deep-copy so we never mutate the live cache object directly
+            const nextRecord = JSON.parse(JSON.stringify(nextRecordRaw));
             let updated = false;
 
             // Update meter start values: next.start = saved.end
