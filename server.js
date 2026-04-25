@@ -17,9 +17,16 @@ const MIME_TYPES = {
 };
 
 const server = http.createServer((req, res) => {
-    let filePath = path.join(STATIC_DIR, req.url === '/' ? 'index.html' : req.url);
+    const urlPath = req.url.split('?')[0];
+    let filePath = path.join(STATIC_DIR, urlPath === '/' ? 'index.html' : urlPath);
     const ext = path.extname(filePath).toLowerCase();
-    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+
+    // SPA fallback: paths without an extension are app routes → serve index.html
+    if (!ext) {
+        filePath = path.join(STATIC_DIR, 'index.html');
+    }
+
+    const contentType = MIME_TYPES[ext] || MIME_TYPES['.html'];
 
     fs.readFile(filePath, (err, data) => {
         if (err) {

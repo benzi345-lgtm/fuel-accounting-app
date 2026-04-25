@@ -3,6 +3,17 @@
   "outputDirectory": ".",
   "cleanUrls": true,
   "trailingSlash": false,
+  "rewrites": [
+    { "source": "/dashboard",       "destination": "/index.html" },
+    { "source": "/compare",         "destination": "/index.html" },
+    { "source": "/daily-entry",     "destination": "/index.html" },
+    { "source": "/history",         "destination": "/index.html" },
+    { "source": "/reference",       "destination": "/index.html" },
+    { "source": "/credit-summary",  "destination": "/index.html" },
+    { "source": "/tax-reports",     "destination": "/index.html" },
+    { "source": "/audit",           "destination": "/index.html" },
+    { "source": "/user-management", "destination": "/index.html" }
+  ],
   "headers": [
     {
       "source": "/(.*\\.html)",

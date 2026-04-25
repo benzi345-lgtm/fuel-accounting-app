@@ -2361,7 +2361,24 @@ function renderCompareContent() {
 }
 
 // ===== NAVIGATION =====
-function navigateTo(page) {
+var PAGE_TITLES = {
+    'dashboard':       'แดชบอร์ด',
+    'compare':         'เปรียบเทียบสาขา',
+    'daily-entry':     'บันทึกประจำวัน',
+    'history':         'ประวัติรายการ',
+    'reference':       'ข้อมูลอ้างอิง',
+    'credit-summary':  'ลูกหนี้เงินเชื่อ',
+    'tax-reports':     'รายงานภาษี',
+    'audit':           'ตรวจสอบงาน',
+    'user-management': 'จัดการผู้ใช้',
+};
+
+function _pageFromPath() {
+    var p = window.location.pathname.replace(/^\//, '') || 'dashboard';
+    return PAGE_TITLES[p] ? p : 'dashboard';
+}
+
+function navigateTo(page, opts) {
     // Auto-save daily entry when navigating AWAY — silent, no toast (user didn't press save).
     // _autoSaveBeforeSwitch handles this case: same record build as saveCurrentRecord but
     // without the success toast or cascade, which are only appropriate for explicit saves.
@@ -2372,22 +2389,17 @@ function navigateTo(page) {
         historyState.stationFilter = '';
     }
     currentPage = page;
+
+    // Update browser URL unless we got here via popstate (browser back/forward)
+    if (!opts || !opts.fromPopstate) {
+        history.pushState({ page: page }, '', '/' + page);
+    }
+
     document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
     const link = document.querySelector(`[data-page="${page}"]`);
     if (link) link.classList.add('active');
 
-    const titles = {
-        'dashboard': 'แดชบอร์ด',
-        'compare': 'เปรียบเทียบสาขา',
-        'daily-entry': 'บันทึกประจำวัน',
-        'history': 'ประวัติรายการ',
-        'reference': 'ข้อมูลอ้างอิง',
-        'credit-summary': 'ลูกหนี้เงินเชื่อ',
-        'tax-reports': 'รายงานภาษี',
-        'audit': 'ตรวจสอบงาน',
-        'user-management': 'จัดการผู้ใช้',
-    };
-    document.getElementById('pageTitle').textContent = titles[page] || '';
+    document.getElementById('pageTitle').textContent = PAGE_TITLES[page] || '';
     renderPage(page);
     // Close sidebar on mobile
     document.getElementById('sidebar').classList.remove('open');
@@ -7036,11 +7048,19 @@ function showApp() {
         };
     });
 
+    // Browser back/forward
+    window.onpopstate = function(e) {
+        var page = (e.state && e.state.page) ? e.state.page : _pageFromPath();
+        editingRecord = null;
+        navigateTo(page, { fromPopstate: true });
+    };
+
     // Sidebar toggle
     document.getElementById('sidebarOpen').onclick = () => document.getElementById('sidebar').classList.add('open');
     document.getElementById('sidebarClose').onclick = () => document.getElementById('sidebar').classList.remove('open');
 
-    navigateTo('dashboard');
+    // Navigate to the page the user originally requested (URL path), or dashboard
+    navigateTo(_pageFromPath());
 }
 
 async function handleLogin() {

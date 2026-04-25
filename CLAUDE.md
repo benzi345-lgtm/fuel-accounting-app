@@ -10,20 +10,20 @@ Thai-language fuel-station accounting web app (ระบบบัญชีน้
 
 - **Frontend**: plain HTML/CSS/JS. Everything UI-related lives in three files at the repo root:
   - `index.html` — shell, sidebar nav, login page, loads scripts from CDN.
-  - `app.js` — **~9.7 k LOC monolith**. Contains: reference data (`REF`), the `DB` data layer, every page renderer (`render<Page>`), all utility/helper functions, and DOM event wiring. There is no module system; everything is global.
+  - `app.js` — **~10.4 k LOC monolith**. Contains: reference data (`REF`), the `DB` data layer, every page renderer (`render<Page>`), all utility/helper functions, and DOM event wiring. There is no module system; everything is global.
   - `style.css` — all styling.
   - `customers-data.js` — large constant `CREDIT_CUSTOMERS_MASTER` (master list of credit customers).
   - `auth.js` — `Auth` module (Supabase auth, profile loading, role check).
   - `supabase-config.js` — `SUPABASE_URL` + publishable anon key. Safe to commit (RLS enforces access).
 - **Backend**: Supabase (Postgres + Auth + Realtime). No custom server.
-- **Local dev server**: `server.js` is a tiny Node `http` static-file server on port 3000 (no deps).
+- **Local dev server**: `server.js` is a tiny Node `http` static-file server on port 3001 (no deps).
 - **Hosting**: Vercel as static site (`vercel.json`). Cache-Control headers force `no-store` on HTML/JS/CSS to prevent stale code after deploys.
 
 ## Common commands
 
 ```bash
 # Run locally (just serves static files)
-node server.js                    # http://localhost:3000
+node server.js                    # http://localhost:3001
 
 # Open directly in a browser also works — no build step needed
 open index.html
@@ -39,6 +39,8 @@ Schema and policy changes are managed via SQL files at the repo root, run **manu
 - `enable-realtime.sql` — adds tables to the `supabase_realtime` publication and sets `REPLICA IDENTITY FULL`. **Required for cross-user live sync.** Idempotent. Must end with the verification SELECT returning 7 rows; if it returns 0, fall back to the Dashboard → Database → Replication UI.
 - `fix-rls-reset.sql` — nukes all policies on `daily_records` and recreates the canonical four (read/insert/update for any authenticated user; delete admin-only). Use when RLS gets into an inconsistent state.
 - `diagnose-user-permissions.sql` — read-only diagnostic queries (user list, RLS policies, who-edited-what). Used to debug per-user save failures.
+- `add-audit-columns.sql` — adds `audited_at` (timestamptz) and `audited_by` (uuid) columns to `daily_records`. Idempotent. Run once to enable the audit page.
+- `diagnose-meter-loss-user.sql` — read-only forensic queries to trace meter-data loss for a specific user; change the email literal in each clause to target a different user.
 
 Important Supabase rule (per existing SQL): the `enable-realtime.sql` script must **not** be wrapped in BEGIN/COMMIT — Supabase silently rolls those back, leaving the publication empty. Each `ALTER PUBLICATION` must be its own statement.
 
@@ -46,7 +48,7 @@ Important Supabase rule (per existing SQL): the `enable-realtime.sql` script mus
 
 All app data is keyed by `station_id + record_date`. Most domain data is stuffed into JSONB columns on `daily_records`:
 
-- `daily_records` — one row per (station, date). JSONB columns: `meter_readings`, `stock_entries`, `product_sales`, `product_stock_entries`, `tax_invoices`, `expenses`, `credit_customers`, `credit_card_entries`, `bluecard_entries`, `internal_usage`, `finance`, `fuel_prices`. Tracks `created_by` / `updated_by`.
+- `daily_records` — one row per (station, date). JSONB columns: `meter_readings`, `stock_entries`, `product_sales`, `product_stock_entries`, `tax_invoices`, `expenses`, `credit_customers`, `credit_card_entries`, `bluecard_entries`, `internal_usage`, `finance`, `fuel_prices`. Tracks `created_by` / `updated_by`. Also has `audited_at` / `audited_by` for the admin audit workflow (see `add-audit-columns.sql`).
 - `user_profiles` — role is `'entry'` or `'admin'`. **First user to log in is auto-promoted to admin** (see `Auth.loadProfile` in `auth.js`).
 - `fuel_prices` — global current prices per fuel type. Per-day historical price is also stored in `daily_records.fuel_prices` (locked once recorded).
 - `tax_entries`, `credit_payments`, `custom_credit_customers`, `app_settings` — auxiliary key-value-ish tables.
@@ -79,7 +81,7 @@ The sync logic is **intentionally non-trivial** because of multi-user concurrent
 
 Navigation is `navigateTo(page)` (`app.js:2192`), which dispatches to one `render<Page>(el)` function per route. All pages render into the single `#pageContent` div by setting `.innerHTML`. The app routes:
 
-`dashboard`, `compare`, `daily-entry`, `history`, `reference`, `credit-summary`, `tax-reports`, `user-management` (admin-only — sidebar entry hidden for non-admins in `showApp()`).
+`dashboard`, `compare`, `daily-entry`, `history`, `reference`, `credit-summary`, `tax-reports`, `user-management`, `audit` (last two are admin-only — sidebar entries hidden for non-admins in `showApp()`). The `audit` page (`renderAudit` / `renderAuditList` / `renderAuditDetail`, `app.js:10105`) lets admins review completion status per station per day and mark records as ตรวจแล้ว; records modified after the audit timestamp are flagged.
 
 The daily-entry page has sub-tabs (meter, stock, products, product-stock, expenses, credit-card, bluecard, internal-usage, credit-customers, tax-invoice, summary), each with its own `render<Tab>` function. Switching sub-tabs auto-saves via `_autoSaveBeforeSwitch`.
 
